@@ -114,3 +114,24 @@ Build production bundles:
 ```bash
 pnpm run build
 ```
+
+## 6. Troubleshooting: Hydration Mismatches & Browser Extensions
+
+If you observe React hydration mismatch errors in local development such as:
+
+```text
+A tree hydrated but some attributes of the server rendered HTML didn't match the client properties.
+- input: fdprocessedid="..."
+- button: fdprocessedid="..."
+```
+
+### Cause
+
+Attributes like `fdprocessedid` are injected directly into form elements (`<input>`, `<button>`, etc.) by browser extensions—notably **McAfee WebAdvisor**, password managers, or autofill utilities—before React completes hydration. Because the server-rendered HTML emitted by Next.js does not contain these third-party attributes, React reports a DOM mismatch against its virtual DOM.
+
+### Verification & Remedy
+
+1. Open the page in an **Incognito / Private Window** with all extensions disabled.
+2. If using Chrome/Edge, verify that extension access in Incognito is toggled off (`chrome://extensions`).
+3. Refresh the page: the mismatch warning will not appear, confirming that CampusFlow's markup is deterministic and correct.
+4. Per CampusFlow engineering standards, we do **not** add `suppressHydrationWarning` or distort clean markup to mask external extension DOM mutations.
