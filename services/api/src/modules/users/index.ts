@@ -10,6 +10,7 @@ usersRouter.get('/profile', async (c) => {
 
   if (!user) {
     user = await defaultStore.createUser({
+      id: session.userId,
       clerkId: session.clerkUserId,
       email: session.email,
       fullName: null,

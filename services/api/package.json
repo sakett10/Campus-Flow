@@ -15,11 +15,15 @@
     "@campusflow/database": "workspace:*",
     "@campusflow/shared": "workspace:*",
     "@campusflow/types": "workspace:*",
+    "@clerk/backend": "^3.22.0",
     "@hono/node-server": "^1.13.8",
     "hono": "^4.7.2",
+    "ioredis": "^5.11.1",
+    "postgres": "^3.4.9",
     "zod": "^3.24.2"
   },
   "devDependencies": {
+    "@types/ioredis": "^5.0.0",
     "@types/node": "^22.13.4",
     "tsx": "^4.19.3",
     "typescript": "^5.7.3"

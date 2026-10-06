@@ -17,6 +17,10 @@ import { sessionsRouter } from './modules/sessions/index.js';
 import { agentsRouter } from './modules/agents/index.js';
 import { notificationsRouter } from './modules/notifications/index.js';
 import { auditRouter } from './modules/audit/index.js';
+import { healthRouter } from './modules/health/index.js';
+import { opportunitiesRouter } from './modules/opportunities/index.js';
+import { careerRouter } from './modules/career/index.js';
+import { applicationsRouter } from './modules/applications/index.js';
 
 export function createApiApp() {
   const app = new Hono();
@@ -26,14 +30,8 @@ export function createApiApp() {
   app.use('*', loggingMiddleware);
   app.onError(errorHandler);
 
-  // 2. Health & Diagnostic Check (unauthenticated)
-  app.get('/health', (c) => {
-    return c.json({
-      status: 'ok',
-      service: 'campusflow-api',
-      timestamp: new Date().toISOString(),
-    });
-  });
+  // 2. Health & Diagnostic Check (unauthenticated, safe diagnostics)
+  app.route('/health', healthRouter);
 
   // 3. Authenticated Business Modules (Modular Monolith)
   const api = new Hono();
@@ -51,6 +49,9 @@ export function createApiApp() {
   api.route('/agents', agentsRouter);
   api.route('/notifications', notificationsRouter);
   api.route('/audit', auditRouter);
+  api.route('/opportunities', opportunitiesRouter);
+  api.route('/career', careerRouter);
+  api.route('/applications', applicationsRouter);
 
   app.route('/api/v1', api);
 

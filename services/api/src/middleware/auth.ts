@@ -9,12 +9,13 @@ export const authMiddleware: MiddlewareHandler = async (c, next) => {
   // Check test header if allowed in non-production
   if (isTestBypass && !isProduction) {
     const testUserId = c.req.header('x-test-user-id');
+    const testUserRole = (c.req.header('x-test-user-role') as 'student' | 'admin') || 'student';
     if (testUserId) {
       const session: AuthSession = {
         userId: testUserId,
         clerkUserId: `clerk_${testUserId}`,
         email: `${testUserId}@campusflow.test`,
-        role: 'student',
+        role: testUserRole,
       };
       c.set('authUser', session);
       return next();
@@ -49,6 +50,32 @@ export const authMiddleware: MiddlewareHandler = async (c, next) => {
     };
     c.set('authUser', session);
     return next();
+  }
+
+  // Real Clerk JWT token verification
+  const clerkSecretKey = process.env['CLERK_SECRET_KEY'];
+  if (clerkSecretKey && clerkSecretKey.startsWith('sk_')) {
+    try {
+      const { verifyToken } = await import('@clerk/backend');
+      const verified = await verifyToken(token, {
+        secretKey: clerkSecretKey,
+      });
+
+      if (verified && verified.sub) {
+        const session: AuthSession = {
+          userId: verified.sub,
+          clerkUserId: verified.sub,
+          email:
+            (verified as unknown as { email?: string }).email ||
+            `${verified.sub}@campusflow.student`,
+          role: 'student',
+        };
+        c.set('authUser', session);
+        return next();
+      }
+    } catch {
+      throw AppError.unauthorized('Invalid or expired Clerk session token.');
+    }
   }
 
   // Fallback if no valid token verified

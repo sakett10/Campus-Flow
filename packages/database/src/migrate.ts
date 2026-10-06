@@ -4,8 +4,31 @@ import postgres from 'postgres';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import fs from 'node:fs';
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+function loadEnv() {
+  const rootEnvPath = path.resolve(__dirname, '../../../.env');
+  if (fs.existsSync(rootEnvPath)) {
+    const lines = fs.readFileSync(rootEnvPath, 'utf-8').split('\n');
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const idx = trimmed.indexOf('=');
+      if (idx !== -1) {
+        const key = trimmed.slice(0, idx).trim();
+        const val = trimmed.slice(idx + 1).trim();
+        if (!process.env[key]) {
+          process.env[key] = val;
+        }
+      }
+    }
+  }
+}
+
+loadEnv();
 
 async function runMigrations() {
   const databaseUrl =

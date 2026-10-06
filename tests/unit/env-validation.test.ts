@@ -61,4 +61,46 @@ describe('Environment Configuration & Validation', () => {
       /SECURITY VIOLATION: AUTH_TEST_BYPASS cannot be true when NODE_ENV is production/,
     );
   });
+
+  it('allows AI_PROVIDER=ollama without AI_PROVIDER_KEY', () => {
+    const ollamaEnv = {
+      ...validMockEnv,
+      AI_PROVIDER: 'ollama',
+      AI_MODEL: 'llama3.2:3b',
+      OLLAMA_BASE_URL: 'http://localhost:11434',
+    };
+    delete (ollamaEnv as Record<string, unknown>)['AI_PROVIDER_KEY'];
+
+    const config = validateEnv(ollamaEnv);
+    expect(config.AI_PROVIDER).toBe('ollama');
+    expect(config.AI_MODEL).toBe('llama3.2:3b');
+    expect(config.OLLAMA_BASE_URL).toBe('http://localhost:11434');
+    expect(config.AI_PROVIDER_KEY).toBeUndefined();
+  });
+
+  it('requires AI_PROVIDER_KEY when AI_PROVIDER=gemini', () => {
+    const geminiWithoutKey = {
+      ...validMockEnv,
+      AI_PROVIDER: 'gemini',
+      AI_MODEL: 'gemini-2.5-flash',
+    };
+    delete (geminiWithoutKey as Record<string, unknown>)['AI_PROVIDER_KEY'];
+
+    expect(() => validateEnv(geminiWithoutKey)).toThrow(
+      /AI_PROVIDER_KEY is required when AI_PROVIDER is "gemini"/,
+    );
+  });
+
+  it('accepts AI_PROVIDER=gemini when AI_PROVIDER_KEY is provided', () => {
+    const geminiWithKey = {
+      ...validMockEnv,
+      AI_PROVIDER: 'gemini',
+      AI_PROVIDER_KEY: 'test-gemini-key',
+      AI_MODEL: 'gemini-2.5-flash',
+    };
+
+    const config = validateEnv(geminiWithKey);
+    expect(config.AI_PROVIDER).toBe('gemini');
+    expect(config.AI_PROVIDER_KEY).toBe('test-gemini-key');
+  });
 });

@@ -4,6 +4,26 @@ import type {
   ResourceChunk,
   AcademicNode,
   SearchQueryResponse,
+  Opportunity,
+  OpportunityRequirement,
+  OpportunitySkillRequirement,
+  OpportunityLocation,
+  OpportunityProgramRule,
+  OpportunitySource,
+  OpportunityEvaluation,
+  StudentCareerProfile,
+  StudentCareerProfileInput,
+  RoleFamily,
+  Skill,
+  StudentSkillEvidence,
+  StudentTargetRole,
+  ActionOptimizerItem,
+  ApplicationRecord,
+  ApplicationStatus,
+  OpportunityLandscapeSummary,
+  StudentSavedOpportunity,
+  StudentSavedOpportunityInput,
+  PredictionTransparencyRecord,
 } from '@campusflow/types';
 
 const API_BASE = process.env['NEXT_PUBLIC_API_URL'] || 'http://localhost:3001/api/v1';
@@ -279,6 +299,347 @@ export async function searchContent(
   });
   if (!res.ok) {
     return { query, totalResults: 0, results: [] };
+  }
+  return await res.json();
+}
+
+// ==========================================
+// Opportunity Intelligence API
+// ==========================================
+
+export async function fetchOpportunities(filters?: {
+  roleFamilyId?: string;
+  status?: string;
+}): Promise<Opportunity[]> {
+  try {
+    const params = new URLSearchParams();
+    if (filters?.roleFamilyId) params.set('roleFamilyId', filters.roleFamilyId);
+    if (filters?.status) params.set('status', filters.status);
+    const qs = params.toString() ? `?${params.toString()}` : '';
+
+    const res = await fetch(`${API_BASE}/opportunities${qs}`, {
+      headers: getHeaders(),
+      cache: 'no-store',
+    });
+    if (!res.ok) throw new Error('Failed to fetch opportunities');
+    const json = await res.json();
+    return json.data || [];
+  } catch {
+    return [];
+  }
+}
+
+export interface OpportunityWithRelations extends Opportunity {
+  requirements?: OpportunityRequirement[];
+  skillRequirements?: Array<OpportunitySkillRequirement & { skill?: Skill }>;
+  locations?: OpportunityLocation[];
+  programRules?: OpportunityProgramRule[];
+  sources?: OpportunitySource[];
+}
+
+export async function fetchOpportunityDetail(id: string): Promise<OpportunityWithRelations | null> {
+  try {
+    const res = await fetch(`${API_BASE}/opportunities/${id}`, {
+      headers: getHeaders(),
+      cache: 'no-store',
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+export async function evaluateOpportunity(id: string): Promise<OpportunityEvaluation | null> {
+  try {
+    const res = await fetch(`${API_BASE}/opportunities/${id}/evaluate`, {
+      method: 'POST',
+      headers: getHeaders(),
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchPredictionTransparency(
+  id: string,
+): Promise<PredictionTransparencyRecord | null> {
+  try {
+    const res = await fetch(`${API_BASE}/opportunities/${id}/transparency`, {
+      headers: getHeaders(),
+      cache: 'no-store',
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchCareerProfile(): Promise<StudentCareerProfile | null> {
+  try {
+    const res = await fetch(`${API_BASE}/career/profile`, {
+      headers: getHeaders(),
+      cache: 'no-store',
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+export async function saveCareerProfile(
+  data: StudentCareerProfileInput,
+): Promise<StudentCareerProfile> {
+  const res = await fetch(`${API_BASE}/career/profile`, {
+    method: 'PUT',
+    headers: getHeaders(),
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Failed to update profile' }));
+    throw new Error(err.detail || 'Failed to update profile');
+  }
+  return await res.json();
+}
+
+export async function fetchRoleFamilies(): Promise<RoleFamily[]> {
+  try {
+    const res = await fetch(`${API_BASE}/career/role-families`, {
+      headers: getHeaders(),
+      cache: 'no-store',
+    });
+    if (!res.ok) return [];
+    return await res.json();
+  } catch {
+    return [];
+  }
+}
+
+export async function fetchTargetRoles(): Promise<
+  Array<StudentTargetRole & { roleFamily?: RoleFamily }>
+> {
+  try {
+    const res = await fetch(`${API_BASE}/career/target-roles`, {
+      headers: getHeaders(),
+      cache: 'no-store',
+    });
+    if (!res.ok) return [];
+    return await res.json();
+  } catch {
+    return [];
+  }
+}
+
+export async function addTargetRole(
+  roleFamilyId: string,
+  priority = 1,
+): Promise<StudentTargetRole> {
+  const res = await fetch(`${API_BASE}/career/target-roles`, {
+    method: 'POST',
+    headers: getHeaders(),
+    body: JSON.stringify({ roleFamilyId, priority }),
+  });
+  if (!res.ok) throw new Error('Failed to add target role');
+  return await res.json();
+}
+
+export async function removeTargetRole(roleFamilyId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/career/target-roles/${roleFamilyId}`, {
+    method: 'DELETE',
+    headers: getHeaders(),
+  });
+  if (!res.ok) throw new Error('Failed to remove target role');
+}
+
+export async function fetchSkillEvidence(): Promise<StudentSkillEvidence[]> {
+  try {
+    const res = await fetch(`${API_BASE}/career/evidence`, {
+      headers: getHeaders(),
+      cache: 'no-store',
+    });
+    if (!res.ok) return [];
+    return await res.json();
+  } catch {
+    return [];
+  }
+}
+
+export async function addSkillEvidence(
+  data: Omit<StudentSkillEvidence, 'id' | 'createdAt' | 'updatedAt'>,
+): Promise<StudentSkillEvidence> {
+  const res = await fetch(`${API_BASE}/career/evidence`, {
+    method: 'POST',
+    headers: getHeaders(),
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Failed to add skill evidence' }));
+    throw new Error(err.detail || 'Failed to add skill evidence');
+  }
+  return await res.json();
+}
+
+export async function deleteSkillEvidence(id: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/career/evidence/${id}`, {
+    method: 'DELETE',
+    headers: getHeaders(),
+  });
+  if (!res.ok) throw new Error('Failed to delete skill evidence');
+}
+
+export async function fetchActionPlan(): Promise<{
+  items: ActionOptimizerItem[];
+  targetRolesCount: number;
+  opportunitiesAnalyzed: number;
+  disclaimer: string;
+}> {
+  try {
+    const res = await fetch(`${API_BASE}/career/action-plan`, {
+      headers: getHeaders(),
+      cache: 'no-store',
+    });
+    if (!res.ok) throw new Error('Failed to fetch action plan');
+    return await res.json();
+  } catch {
+    return {
+      items: [],
+      targetRolesCount: 0,
+      opportunitiesAnalyzed: 0,
+      disclaimer: 'Action recommendations identify highest-impact skill gaps across target roles.',
+    };
+  }
+}
+
+export async function fetchApplications(): Promise<
+  Array<ApplicationRecord & { opportunity?: Opportunity }>
+> {
+  try {
+    const res = await fetch(`${API_BASE}/applications`, {
+      headers: getHeaders(),
+      cache: 'no-store',
+    });
+    if (!res.ok) return [];
+    return await res.json();
+  } catch {
+    return [];
+  }
+}
+
+export async function createApplication(
+  opportunityId: string,
+  notes?: string,
+): Promise<ApplicationRecord> {
+  const res = await fetch(`${API_BASE}/applications`, {
+    method: 'POST',
+    headers: getHeaders(),
+    body: JSON.stringify({ opportunityId, notes }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Failed to create application record' }));
+    throw new Error(err.detail || 'Failed to create application record');
+  }
+  return await res.json();
+}
+
+export async function updateApplicationStatus(
+  id: string,
+  status: ApplicationStatus,
+  notes?: string,
+): Promise<ApplicationRecord> {
+  const res = await fetch(`${API_BASE}/applications/${id}`, {
+    method: 'PATCH',
+    headers: getHeaders(),
+    body: JSON.stringify({ status, notes }),
+  });
+  if (!res.ok) throw new Error('Failed to update application status');
+  return await res.json();
+}
+
+export async function fetchOpportunityLandscape(): Promise<OpportunityLandscapeSummary> {
+  try {
+    const res = await fetch(`${API_BASE}/opportunities/landscape`, {
+      headers: getHeaders(),
+      cache: 'no-store',
+    });
+    if (!res.ok) throw new Error('Failed to fetch opportunity landscape');
+    return await res.json();
+  } catch {
+    return {
+      totalDiscovered: 0,
+      eligibleCount: 0,
+      strongMatchesCount: 0,
+      preparationRequiredCount: 0,
+      ineligibleCount: 0,
+    };
+  }
+}
+
+export async function fetchStudentSavedOpportunities(): Promise<
+  Array<StudentSavedOpportunity & { opportunity?: Opportunity }>
+> {
+  try {
+    const res = await fetch(`${API_BASE}/career/saved-opportunities`, {
+      headers: getHeaders(),
+      cache: 'no-store',
+    });
+    if (!res.ok) return [];
+    return await res.json();
+  } catch {
+    return [];
+  }
+}
+
+export async function createStudentSavedOpportunity(
+  data: StudentSavedOpportunityInput,
+): Promise<StudentSavedOpportunity> {
+  const res = await fetch(`${API_BASE}/career/saved-opportunities`, {
+    method: 'POST',
+    headers: getHeaders(),
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Failed to save opportunity' }));
+    throw new Error(err.detail || 'Failed to save opportunity');
+  }
+  return await res.json();
+}
+
+export async function updateStudentSavedOpportunity(
+  id: string,
+  updates: Partial<StudentSavedOpportunityInput>,
+): Promise<StudentSavedOpportunity> {
+  const res = await fetch(`${API_BASE}/career/saved-opportunities/${id}`, {
+    method: 'PATCH',
+    headers: getHeaders(),
+    body: JSON.stringify(updates),
+  });
+  if (!res.ok) throw new Error('Failed to update saved opportunity');
+  return await res.json();
+}
+
+export async function deleteStudentSavedOpportunity(id: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/career/saved-opportunities/${id}`, {
+    method: 'DELETE',
+    headers: getHeaders(),
+  });
+  if (!res.ok) throw new Error('Failed to delete saved opportunity');
+}
+
+export async function syncAcademicEvidence(): Promise<{
+  syncedCount: number;
+  evidence: StudentSkillEvidence[];
+}> {
+  const res = await fetch(`${API_BASE}/career/evidence/sync-academic`, {
+    method: 'POST',
+    headers: getHeaders(),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Failed to sync academic evidence' }));
+    throw new Error(err.detail || 'Failed to sync academic evidence');
   }
   return await res.json();
 }

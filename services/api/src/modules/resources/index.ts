@@ -4,7 +4,8 @@ import { getSession } from '../../middleware/auth.js';
 import { defaultStore } from '../../data/store.js';
 import {
   AppError,
-  InMemoryObjectStorage,
+  type ObjectStorage,
+  createObjectStorageFromEnv,
   normalizeFileName,
   validateFileBytes,
   INGESTION_LIMITS,
@@ -13,7 +14,7 @@ import {
 } from '@campusflow/shared';
 
 export const resourcesRouter = new Hono();
-export const sharedStorage = new InMemoryObjectStorage();
+export const sharedStorage: ObjectStorage = createObjectStorageFromEnv();
 export const sharedOutboxStore = new InMemoryOutboxStore();
 export const sharedOutboxManager = new TransactionalOutboxManager(sharedOutboxStore);
 

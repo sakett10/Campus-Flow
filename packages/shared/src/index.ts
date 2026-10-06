@@ -7,3 +7,4 @@ export * from './storage.js';
 export * from './ai-provider.js';
 export * from './outbox.js';
 export * from './ingestion/index.js';
+export * from './opportunities/index.js';

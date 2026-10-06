@@ -3,7 +3,8 @@
 import React from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { BookOpen, Search, Calendar, Cpu, CheckCircle } from 'lucide-react';
+import { BookOpen, Search, Calendar, Cpu, CheckCircle, Briefcase } from 'lucide-react';
+import { SignedIn, SignedOut, UserButton, SignInButton } from '@clerk/nextjs';
 
 export function Navbar() {
   const pathname = usePathname();
@@ -12,6 +13,7 @@ export function Navbar() {
     { href: '/', label: 'Today', icon: Calendar },
     { href: '/courses', label: 'Courses', icon: BookOpen },
     { href: '/search', label: 'Search', icon: Search },
+    { href: '/opportunities', label: 'Opportunities', icon: Briefcase },
   ];
 
   return (
@@ -60,12 +62,32 @@ export function Navbar() {
           </nav>
         </div>
 
-        {/* Right Status Indicator */}
+        {/* Right Status Indicator & Clerk Auth */}
         <div className="flex items-center space-x-3">
           <div className="flex items-center space-x-2 px-2.5 py-1 rounded-full bg-emerald-950/40 border border-emerald-800/40 text-emerald-400 text-[11px] font-mono">
             <CheckCircle className="w-3 h-3 text-emerald-400" />
             <span>Second Brain Active</span>
           </div>
+
+          <SignedIn>
+            <UserButton
+              appearance={{
+                elements: {
+                  avatarBox: 'w-7 h-7',
+                },
+              }}
+            />
+          </SignedIn>
+          <SignedOut>
+            <SignInButton mode="modal">
+              <button
+                type="button"
+                className="px-3 py-1.5 rounded-md text-xs font-medium bg-[var(--cf-primary)] text-white hover:bg-[var(--cf-primary)]/90 transition-colors shadow-sm"
+              >
+                Sign In
+              </button>
+            </SignInButton>
+          </SignedOut>
         </div>
       </div>
     </header>

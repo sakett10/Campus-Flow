@@ -11,6 +11,7 @@ import {
   index,
   uniqueIndex,
   customType,
+  boolean,
 } from 'drizzle-orm/pg-core';
 
 /**
@@ -325,3 +326,621 @@ export const jobOutbox = pgTable(
 
 export type JobOutboxRow = typeof jobOutbox.$inferSelect;
 export type NewJobOutboxRow = typeof jobOutbox.$inferInsert;
+
+/**
+ * =====================================================================
+ * OPPORTUNITY INTELLIGENCE FOUNDATION TABLES
+ * =====================================================================
+ */
+
+/**
+ * Table: companies
+ * Neutral organization metadata without prestige rankings.
+ */
+export const companies = pgTable(
+  'companies',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    name: varchar('name', { length: 255 }).notNull(),
+    slug: varchar('slug', { length: 255 }).notNull(),
+    websiteUrl: varchar('website_url', { length: 512 }),
+    description: text('description'),
+    industry: varchar('industry', { length: 100 }),
+    isVerified: boolean('is_verified').notNull().default(true),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex('companies_slug_idx').on(table.slug)],
+);
+
+export type CompanyRow = typeof companies.$inferSelect;
+export type NewCompanyRow = typeof companies.$inferInsert;
+
+/**
+ * Table: role_families
+ * Standardized job taxonomy without prestige ranking.
+ */
+export const roleFamilies = pgTable(
+  'role_families',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    name: varchar('name', { length: 255 }).notNull(),
+    description: text('description'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex('role_families_name_idx').on(table.name)],
+);
+
+export type RoleFamilyRow = typeof roleFamilies.$inferSelect;
+export type NewRoleFamilyRow = typeof roleFamilies.$inferInsert;
+
+/**
+ * Table: opportunities
+ * Real internship and early-career postings with full provenance.
+ */
+export const opportunities = pgTable(
+  'opportunities',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    companyId: uuid('company_id')
+      .notNull()
+      .references(() => companies.id, { onDelete: 'cascade' }),
+    roleFamilyId: uuid('role_family_id')
+      .notNull()
+      .references(() => roleFamilies.id, { onDelete: 'cascade' }),
+    title: varchar('title', { length: 255 }).notNull(),
+    opportunityType: varchar('opportunity_type', { length: 50 }).notNull().default('internship'),
+    targetGraduationYears: jsonb('target_graduation_years').notNull().default([]),
+    degreeLevels: jsonb('degree_levels').notNull().default([]),
+    allowedMajors: jsonb('allowed_majors').notNull().default([]),
+    description: text('description'),
+    season: varchar('season', { length: 100 }),
+    employmentType: varchar('employment_type', { length: 50 }).notNull().default('internship'),
+    workplaceType: varchar('workplace_type', { length: 50 }).notNull().default('hybrid'),
+    status: varchar('status', { length: 50 }).notNull().default('active'),
+    minGpa: numeric('min_gpa', { precision: 3, scale: 2 }),
+    minExperienceMonths: integer('min_experience_months').notNull().default(0),
+    requiresWorkAuth: varchar('requires_work_auth', { length: 50 }).notNull().default('any'),
+    // Provenance fields
+    sourceUrl: text('source_url').notNull(),
+    sourceOrganization: varchar('source_organization', { length: 255 }).notNull(),
+    retrievalTimestamp: timestamp('retrieval_timestamp', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    publicationDate: timestamp('publication_date', { withTimezone: true }),
+    expirationDate: timestamp('expiration_date', { withTimezone: true }),
+    lastValidTimestamp: timestamp('last_valid_timestamp', { withTimezone: true }),
+    extractionVersion: varchar('extraction_version', { length: 20 }).notNull().default('v1'),
+    contentHash: varchar('content_hash', { length: 64 }),
+    ingestionProvider: varchar('ingestion_provider', { length: 100 })
+      .notNull()
+      .default('official_direct'),
+    isCanonical: boolean('is_canonical').notNull().default(true),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index('opportunities_company_id_idx').on(table.companyId),
+    index('opportunities_role_family_id_idx').on(table.roleFamilyId),
+    index('opportunities_status_idx').on(table.status),
+    index('opportunities_type_idx').on(table.opportunityType),
+    index('opportunities_canonical_idx').on(table.isCanonical),
+    index('opportunities_source_url_idx').on(table.sourceUrl),
+  ],
+);
+
+export type OpportunityRow = typeof opportunities.$inferSelect;
+export type NewOpportunityRow = typeof opportunities.$inferInsert;
+
+/**
+ * Table: opportunity_requirements
+ * Discrete requirements (degree, work authorization, graduation date, etc.).
+ */
+export const opportunityRequirements = pgTable(
+  'opportunity_requirements',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    opportunityId: uuid('opportunity_id')
+      .notNull()
+      .references(() => opportunities.id, { onDelete: 'cascade' }),
+    category: varchar('category', { length: 50 }).notNull(),
+    description: text('description').notNull(),
+    isMandatory: boolean('is_mandatory').notNull().default(true),
+    parsedRule: jsonb('parsed_rule'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index('opportunity_requirements_opportunity_id_idx').on(table.opportunityId),
+    index('opportunity_requirements_category_idx').on(table.category),
+  ],
+);
+
+export type OpportunityRequirementRow = typeof opportunityRequirements.$inferSelect;
+export type NewOpportunityRequirementRow = typeof opportunityRequirements.$inferInsert;
+
+/**
+ * Table: skills
+ * Canonical skill dictionary with category and synonyms.
+ */
+export const skills = pgTable(
+  'skills',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    name: varchar('name', { length: 255 }).notNull(),
+    category: varchar('category', { length: 50 }).notNull().default('concept'),
+    synonyms: jsonb('synonyms').notNull().default([]),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('skills_name_idx').on(table.name),
+    index('skills_category_idx').on(table.category),
+  ],
+);
+
+export type SkillRow = typeof skills.$inferSelect;
+export type NewSkillRow = typeof skills.$inferInsert;
+
+/**
+ * Table: opportunity_skill_requirements
+ * Skills required or preferred for an opportunity with importance weights.
+ */
+export const opportunitySkillRequirements = pgTable(
+  'opportunity_skill_requirements',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    opportunityId: uuid('opportunity_id')
+      .notNull()
+      .references(() => opportunities.id, { onDelete: 'cascade' }),
+    skillId: uuid('skill_id')
+      .notNull()
+      .references(() => skills.id, { onDelete: 'cascade' }),
+    requirementType: varchar('requirement_type', { length: 50 }).notNull().default('required'),
+    minProficiency: varchar('min_proficiency', { length: 50 }).notNull().default('proficient'),
+    importanceWeight: numeric('importance_weight', { precision: 4, scale: 2 })
+      .notNull()
+      .default('1.00'),
+    notes: text('notes'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index('opp_skill_reqs_opp_id_idx').on(table.opportunityId),
+    index('opp_skill_reqs_skill_id_idx').on(table.skillId),
+    uniqueIndex('opp_skill_reqs_unique_idx').on(table.opportunityId, table.skillId),
+  ],
+);
+
+export type OpportunitySkillRequirementRow = typeof opportunitySkillRequirements.$inferSelect;
+export type NewOpportunitySkillRequirementRow = typeof opportunitySkillRequirements.$inferInsert;
+
+/**
+ * Table: opportunity_locations
+ */
+export const opportunityLocations = pgTable(
+  'opportunity_locations',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    opportunityId: uuid('opportunity_id')
+      .notNull()
+      .references(() => opportunities.id, { onDelete: 'cascade' }),
+    city: varchar('city', { length: 100 }),
+    stateProvince: varchar('state_province', { length: 100 }),
+    country: varchar('country', { length: 100 }).notNull().default('US'),
+    isRemote: boolean('is_remote').notNull().default(false),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index('opp_locations_opp_id_idx').on(table.opportunityId)],
+);
+
+export type OpportunityLocationRow = typeof opportunityLocations.$inferSelect;
+export type NewOpportunityLocationRow = typeof opportunityLocations.$inferInsert;
+
+/**
+ * Table: opportunity_program_rules
+ */
+export const opportunityProgramRules = pgTable(
+  'opportunity_program_rules',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    opportunityId: uuid('opportunity_id')
+      .notNull()
+      .references(() => opportunities.id, { onDelete: 'cascade' }),
+    ruleType: varchar('rule_type', { length: 100 }).notNull(),
+    ruleValue: jsonb('rule_value').notNull().default({}),
+    explanation: text('explanation'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index('opp_program_rules_opp_id_idx').on(table.opportunityId)],
+);
+
+export type OpportunityProgramRuleRow = typeof opportunityProgramRules.$inferSelect;
+export type NewOpportunityProgramRuleRow = typeof opportunityProgramRules.$inferInsert;
+
+/**
+ * Table: opportunity_sources
+ */
+export const opportunitySources = pgTable(
+  'opportunity_sources',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    opportunityId: uuid('opportunity_id')
+      .notNull()
+      .references(() => opportunities.id, { onDelete: 'cascade' }),
+    sourceUrl: text('source_url').notNull(),
+    sourceType: varchar('source_type', { length: 50 }).notNull().default('official_ats'),
+    retrievedAt: timestamp('retrieved_at', { withTimezone: true }).notNull().defaultNow(),
+    rawPayload: jsonb('raw_payload'),
+    hash: varchar('hash', { length: 64 }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index('opp_sources_opp_id_idx').on(table.opportunityId)],
+);
+
+export type OpportunitySourceRow = typeof opportunitySources.$inferSelect;
+export type NewOpportunitySourceRow = typeof opportunitySources.$inferInsert;
+
+/**
+ * Table: student_career_profiles
+ * Private student career preferences and verified academic standing.
+ */
+export const studentCareerProfiles = pgTable(
+  'student_career_profiles',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    targetCareerPath: varchar('target_career_path', { length: 255 }),
+    targetGeography: jsonb('target_geography').notNull().default([]),
+    targetRecruitingPeriod: varchar('target_recruiting_period', { length: 100 }),
+    degreeLevel: varchar('degree_level', { length: 50 }),
+    major: varchar('major', { length: 255 }),
+    university: varchar('university', { length: 255 }),
+    graduationYear: integer('graduation_year'),
+    graduationMonth: integer('graduation_month'),
+    currentYearOfStudy: integer('current_year_of_study'),
+    isEnrolled: boolean('is_enrolled').notNull().default(true),
+    workAuthorization: varchar('work_authorization', { length: 100 }),
+    gpa: numeric('gpa', { precision: 3, scale: 2 }),
+    yearsExperience: numeric('years_experience', { precision: 3, scale: 1 })
+      .notNull()
+      .default('0.0'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex('student_career_profiles_user_id_idx').on(table.userId)],
+);
+
+export type StudentCareerProfileRow = typeof studentCareerProfiles.$inferSelect;
+export type NewStudentCareerProfileRow = typeof studentCareerProfiles.$inferInsert;
+
+/**
+ * Table: student_target_roles
+ */
+export const studentTargetRoles = pgTable(
+  'student_target_roles',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    roleFamilyId: uuid('role_family_id')
+      .notNull()
+      .references(() => roleFamilies.id, { onDelete: 'cascade' }),
+    priority: integer('priority').notNull().default(1),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index('student_target_roles_user_id_idx').on(table.userId),
+    uniqueIndex('student_target_roles_unique_idx').on(table.userId, table.roleFamilyId),
+  ],
+);
+
+export type StudentTargetRoleRow = typeof studentTargetRoles.$inferSelect;
+export type NewStudentTargetRoleRow = typeof studentTargetRoles.$inferInsert;
+
+/**
+ * Table: student_target_companies
+ */
+export const studentTargetCompanies = pgTable(
+  'student_target_companies',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    companyId: uuid('company_id')
+      .notNull()
+      .references(() => companies.id, { onDelete: 'cascade' }),
+    priority: integer('priority').notNull().default(1),
+    notes: text('notes'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index('student_target_companies_user_id_idx').on(table.userId),
+    uniqueIndex('student_target_companies_unique_idx').on(table.userId, table.companyId),
+  ],
+);
+
+export type StudentTargetCompanyRow = typeof studentTargetCompanies.$inferSelect;
+export type NewStudentTargetCompanyRow = typeof studentTargetCompanies.$inferInsert;
+
+/**
+ * Table: student_skill_evidence
+ * Links skills to demonstrated evidence (academic nodes, courses, projects).
+ * Self-reported claims are explicitly distinguished from demonstrated evidence.
+ */
+export const studentSkillEvidence = pgTable(
+  'student_skill_evidence',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    skillId: uuid('skill_id')
+      .notNull()
+      .references(() => skills.id, { onDelete: 'cascade' }),
+    evidenceLevel: varchar('evidence_level', { length: 50 }).notNull().default('claimed'),
+    evidenceSource: varchar('evidence_source', { length: 50 }).notNull().default('self_reported'),
+    academicNodeId: uuid('academic_node_id').references(() => academicNodes.id, {
+      onDelete: 'set null',
+    }),
+    courseId: uuid('course_id').references(() => courses.id, { onDelete: 'set null' }),
+    assessmentId: uuid('assessment_id').references(() => assessments.id, { onDelete: 'set null' }),
+    title: varchar('title', { length: 255 }).notNull(),
+    description: text('description'),
+    artifactUrl: text('artifact_url'),
+    verifiedAt: timestamp('verified_at', { withTimezone: true }),
+    confidenceScore: numeric('confidence_score', { precision: 4, scale: 3 })
+      .notNull()
+      .default('0.400'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index('student_skill_evidence_user_id_idx').on(table.userId),
+    index('student_skill_evidence_skill_id_idx').on(table.skillId),
+    index('student_skill_evidence_level_idx').on(table.userId, table.evidenceLevel),
+    index('student_skill_evidence_assessment_id_idx').on(table.assessmentId),
+  ],
+);
+
+export type StudentSkillEvidenceRow = typeof studentSkillEvidence.$inferSelect;
+export type NewStudentSkillEvidenceRow = typeof studentSkillEvidence.$inferInsert;
+
+/**
+ * Table: application_records
+ * Application lifecycle tracking with explicit state transitions.
+ */
+export const applicationRecords = pgTable(
+  'application_records',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    opportunityId: uuid('opportunity_id')
+      .notNull()
+      .references(() => opportunities.id, { onDelete: 'cascade' }),
+    status: varchar('status', { length: 50 }).notNull().default('applied'),
+    appliedAt: timestamp('applied_at', { withTimezone: true }).notNull().defaultNow(),
+    assessmentAt: timestamp('assessment_at', { withTimezone: true }),
+    interviewAt: timestamp('interview_at', { withTimezone: true }),
+    finalInterviewAt: timestamp('final_interview_at', { withTimezone: true }),
+    outcomeAt: timestamp('outcome_at', { withTimezone: true }),
+    outcomeNotes: text('outcome_notes'),
+    stateTransitions: jsonb('state_transitions').notNull().default([]),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index('application_records_user_id_idx').on(table.userId),
+    index('application_records_opportunity_id_idx').on(table.opportunityId),
+    index('application_records_user_status_idx').on(table.userId, table.status),
+    uniqueIndex('application_records_user_opp_idx').on(table.userId, table.opportunityId),
+  ],
+);
+
+export type ApplicationRecordRow = typeof applicationRecords.$inferSelect;
+export type NewApplicationRecordRow = typeof applicationRecords.$inferInsert;
+
+/**
+ * Table: student_saved_opportunities
+ * Student-saved external or canonical opportunities with personal notes.
+ * Strict user ownership isolation.
+ */
+export const studentSavedOpportunities = pgTable(
+  'student_saved_opportunities',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    opportunityId: uuid('opportunity_id').references(() => opportunities.id, {
+      onDelete: 'cascade',
+    }),
+    customTitle: varchar('custom_title', { length: 255 }),
+    customCompany: varchar('custom_company', { length: 255 }),
+    sourceUrl: text('source_url'),
+    notes: text('notes'),
+    status: varchar('status', { length: 50 }).notNull().default('saved'), // 'saved' | 'researching' | 'archived'
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index('student_saved_opps_user_id_idx').on(table.userId),
+    index('student_saved_opps_opp_id_idx').on(table.opportunityId),
+    uniqueIndex('student_saved_opps_user_opp_idx').on(table.userId, table.opportunityId),
+  ],
+);
+
+export type StudentSavedOpportunityRow = typeof studentSavedOpportunities.$inferSelect;
+export type NewStudentSavedOpportunityRow = typeof studentSavedOpportunities.$inferInsert;
+
+/**
+ * Table: concept_skill_mappings
+ * Extensible knowledge-to-skill dictionary mapping academic concepts to normalized career skills.
+ */
+export const conceptSkillMappings = pgTable(
+  'concept_skill_mappings',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    conceptName: varchar('concept_name', { length: 255 }).notNull(),
+    skillName: varchar('skill_name', { length: 255 }).notNull(),
+    skillCategory: varchar('skill_category', { length: 50 }).notNull().default('concept'),
+    relevanceScore: numeric('relevance_score', { precision: 3, scale: 2 })
+      .notNull()
+      .default('1.00'),
+    provenance: varchar('provenance', { length: 50 }).notNull().default('canonical_curated'), // 'canonical_curated' | 'model_inferred' | 'verified_academic'
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('concept_skill_mappings_unique_idx').on(table.conceptName, table.skillName),
+    index('concept_skill_mappings_concept_idx').on(table.conceptName),
+    index('concept_skill_mappings_skill_idx').on(table.skillName),
+  ],
+);
+
+export type ConceptSkillMappingRow = typeof conceptSkillMappings.$inferSelect;
+export type NewConceptSkillMappingRow = typeof conceptSkillMappings.$inferInsert;
+
+/**
+ * Table: prediction_snapshots
+ * Immutable snapshot of student qualifications and context captured at prediction time.
+ */
+export const predictionSnapshots = pgTable(
+  'prediction_snapshots',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    opportunityId: uuid('opportunity_id')
+      .notNull()
+      .references(() => opportunities.id, { onDelete: 'cascade' }),
+    snapshotTimestamp: timestamp('snapshot_timestamp', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    educationSnapshot: jsonb('education_snapshot').notNull(),
+    graduationTiming: jsonb('graduation_timing').notNull(),
+    academicEvidenceSnapshot: jsonb('academic_evidence_snapshot').notNull().default([]),
+    skillEvidenceSnapshot: jsonb('skill_evidence_snapshot').notNull().default([]),
+    projectEvidenceSnapshot: jsonb('project_evidence_snapshot').notNull().default([]),
+    experienceSnapshot: jsonb('experience_snapshot').notNull().default({}),
+    targetContext: jsonb('target_context').notNull().default({}),
+    applicationContext: jsonb('application_context'),
+    contentHash: varchar('content_hash', { length: 64 }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index('prediction_snapshots_user_id_idx').on(table.userId),
+    index('prediction_snapshots_opp_id_idx').on(table.opportunityId),
+    index('prediction_snapshots_hash_idx').on(table.contentHash),
+    index('prediction_snapshots_timestamp_idx').on(table.snapshotTimestamp),
+  ],
+);
+
+export type PredictionSnapshotRow = typeof predictionSnapshots.$inferSelect;
+export type NewPredictionSnapshotRow = typeof predictionSnapshots.$inferInsert;
+
+/**
+ * Table: opportunity_snapshots
+ * Immutable snapshot of opportunity requirements, skills, and rules at application/prediction time.
+ */
+export const opportunitySnapshots = pgTable(
+  'opportunity_snapshots',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    opportunityId: uuid('opportunity_id')
+      .notNull()
+      .references(() => opportunities.id, { onDelete: 'cascade' }),
+    snapshotTimestamp: timestamp('snapshot_timestamp', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    company: jsonb('company').notNull(),
+    role: jsonb('role').notNull(),
+    roleFamily: jsonb('role_family').notNull(),
+    eligibilityRules: jsonb('eligibility_rules').notNull(),
+    requiredSkills: jsonb('required_skills').notNull().default([]),
+    preferredSkills: jsonb('preferred_skills').notNull().default([]),
+    programRules: jsonb('program_rules').notNull().default([]),
+    sourceProvenance: jsonb('source_provenance').notNull(),
+    contentHash: varchar('content_hash', { length: 64 }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index('opportunity_snapshots_opp_id_idx').on(table.opportunityId),
+    index('opportunity_snapshots_hash_idx').on(table.contentHash),
+    index('opportunity_snapshots_timestamp_idx').on(table.snapshotTimestamp),
+  ],
+);
+
+export type OpportunitySnapshotRow = typeof opportunitySnapshots.$inferSelect;
+export type NewOpportunitySnapshotRow = typeof opportunitySnapshots.$inferInsert;
+
+/**
+ * Table: model_registries
+ * Governed catalog of calibrated probabilistic outcome models.
+ */
+export const modelRegistries = pgTable(
+  'model_registries',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    modelVersion: varchar('model_version', { length: 50 }).notNull(),
+    target: varchar('target', { length: 50 }).notNull(),
+    population: jsonb('population').notNull(),
+    datasetVersion: varchar('dataset_version', { length: 100 }).notNull(),
+    featureSchemaVersion: varchar('feature_schema_version', { length: 50 }).notNull(),
+    algorithm: varchar('algorithm', { length: 100 }).notNull(),
+    hyperparameters: jsonb('hyperparameters').notNull().default({}),
+    trainingPeriod: jsonb('training_period').notNull(),
+    validationPeriod: jsonb('validation_period').notNull(),
+    testPeriod: jsonb('test_period').notNull(),
+    metrics: jsonb('metrics').notNull(),
+    calibrationResults: jsonb('calibration_results').notNull(),
+    limitations: jsonb('limitations').notNull().default([]),
+    approvalStatus: varchar('approval_status', { length: 50 }).notNull().default('draft'),
+    approvedBy: uuid('approved_by').references(() => users.id, { onDelete: 'set null' }),
+    approvedAt: timestamp('approved_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('model_registries_version_idx').on(table.modelVersion),
+    index('model_registries_target_idx').on(table.target),
+    index('model_registries_status_idx').on(table.approvalStatus),
+  ],
+);
+
+export type ModelRegistryRow = typeof modelRegistries.$inferSelect;
+export type NewModelRegistryRow = typeof modelRegistries.$inferInsert;
+
+/**
+ * Table: model_cards
+ * Transparent documentation cards for approved models.
+ */
+export const modelCards = pgTable(
+  'model_cards',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    modelVersion: varchar('model_version', { length: 50 }).notNull(),
+    purpose: text('purpose').notNull(),
+    targetPopulation: text('target_population').notNull(),
+    trainingData: text('training_data').notNull(),
+    validationStrategy: text('validation_strategy').notNull(),
+    metrics: jsonb('metrics').notNull(),
+    calibration: text('calibration').notNull(),
+    limitations: jsonb('limitations').notNull().default([]),
+    knownMissingVariables: jsonb('known_missing_variables').notNull().default([]),
+    knownBiasRisks: jsonb('known_bias_risks').notNull().default([]),
+    appropriateInterpretation: text('appropriate_interpretation').notNull(),
+    inappropriateInterpretation: text('inappropriate_interpretation').notNull(),
+    publishedAt: timestamp('published_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex('model_cards_version_idx').on(table.modelVersion)],
+);
+
+export type ModelCardRow = typeof modelCards.$inferSelect;
+export type NewModelCardRow = typeof modelCards.$inferInsert;

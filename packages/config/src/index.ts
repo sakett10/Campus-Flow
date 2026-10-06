@@ -27,8 +27,9 @@ export const envSchema = z
       .transform((val) => val === 'true'),
 
     // AI Provider Abstraction
-    AI_PROVIDER: z.enum(['stub', 'gemini', 'openai']).default('stub'),
-    AI_PROVIDER_KEY: z.string().min(1, 'AI_PROVIDER_KEY is required'),
+    AI_PROVIDER: z.enum(['stub', 'gemini', 'openai', 'ollama']).default('stub'),
+    AI_PROVIDER_KEY: z.string().optional(),
+    OLLAMA_BASE_URL: z.string().url().default('http://localhost:11434'),
     AI_MODEL: z.string().min(1, 'AI_MODEL is required'),
 
     // Cryptography
@@ -58,6 +59,18 @@ export const envSchema = z
     {
       message: 'SECURITY VIOLATION: AUTH_TEST_BYPASS cannot be true when NODE_ENV is production',
       path: ['AUTH_TEST_BYPASS'],
+    },
+  )
+  .refine(
+    (data) => {
+      if (data.AI_PROVIDER === 'gemini') {
+        return Boolean(data.AI_PROVIDER_KEY && data.AI_PROVIDER_KEY.trim().length > 0);
+      }
+      return true;
+    },
+    {
+      message: 'AI_PROVIDER_KEY is required when AI_PROVIDER is "gemini"',
+      path: ['AI_PROVIDER_KEY'],
     },
   );
 

@@ -1,17 +1,39 @@
 import { Worker, type Job } from 'bullmq';
-import { validateEnv } from '@campusflow/config';
-import { createLogger } from '@campusflow/shared';
+import { validateEnv, type EnvConfig } from '@campusflow/config';
+import { createLogger, S3ObjectStorage } from '@campusflow/shared';
+import { PostgresDataStore } from '@campusflow/database';
 import { QUEUE_NAMES } from './queues.js';
+import { processResourceJob, type ResourceJobPayload } from './processors/resource-processor.js';
 
 const logger = createLogger({ module: 'worker' });
 
 export * from './processors/resource-processor.js';
 
+let sharedStore: PostgresDataStore | null = null;
+let sharedStorage: S3ObjectStorage | null = null;
+
+function getStoreAndStorage(env: EnvConfig) {
+  if (!sharedStore) {
+    sharedStore = new PostgresDataStore(env.DATABASE_URL);
+  }
+  if (!sharedStorage) {
+    sharedStorage = new S3ObjectStorage({
+      endpoint: env.STORAGE_ENDPOINT,
+      bucket: env.STORAGE_BUCKET,
+      accessKeyId: env.STORAGE_ACCESS_KEY,
+      secretAccessKey: env.STORAGE_SECRET_KEY,
+      region: env.STORAGE_REGION,
+      forcePathStyle: env.STORAGE_FORCE_PATH_STYLE,
+    });
+  }
+  return { store: sharedStore, storage: sharedStorage };
+}
+
 async function processJob(job: Job) {
   const start = Date.now();
   const queueName = job.queueName;
   const jobId = job.id;
-  const data = job.data as { userId?: string; resourceId?: string };
+  const data = job.data as ResourceJobPayload;
 
   logger.info(`Starting execution of job [${queueName}:${jobId}]`, {
     jobId,
@@ -20,9 +42,10 @@ async function processJob(job: Job) {
   });
 
   if (queueName === 'resource-processing') {
-    // In production, instantiate DB client and S3 client
-    // Handled via processResourceJob
+    const env = validateEnv();
+    const { store, storage } = getStoreAndStorage(env);
     logger.info(`Resource processing execution handler invoked for ${data?.resourceId}`);
+    await processResourceJob(data, store, storage);
   }
 
   const durationMs = Date.now() - start;
