@@ -105,9 +105,11 @@ export const assessments = pgTable(
       .notNull()
       .references(() => courses.id, { onDelete: 'cascade' }),
     title: varchar('title', { length: 255 }).notNull(),
-    type: varchar('type', { length: 50 }).notNull(), // CAT, FAT, Quiz, Assignment, etc.
+    type: varchar('type', { length: 50 }).notNull(), // CAT, FAT, Quiz, Assignment, Project, Lab, Other
     date: timestamp('date', { withTimezone: true }),
+    totalMarks: numeric('total_marks', { precision: 6, scale: 2 }),
     weightage: numeric('weightage', { precision: 5, scale: 2 }), // e.g. 15.00%
+    status: varchar('status', { length: 50 }).notNull().default('upcoming'), // upcoming, completed, cancelled
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -120,6 +122,46 @@ export const assessments = pgTable(
 
 export type AssessmentRow = typeof assessments.$inferSelect;
 export type NewAssessmentRow = typeof assessments.$inferInsert;
+
+/**
+ * Table: assessment_topics
+ *
+ * Many-to-Many join table linking assessments to scoped academic topics.
+ * Preserves marks/weightage provenance and declared sources (user, syllabus, question_paper, inferred).
+ */
+export const assessmentTopics = pgTable(
+  'assessment_topics',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    assessmentId: uuid('assessment_id')
+      .notNull()
+      .references(() => assessments.id, { onDelete: 'cascade' }),
+    topicId: uuid('topic_id')
+      .notNull()
+      .references(() => academicNodes.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    courseId: uuid('course_id')
+      .notNull()
+      .references(() => courses.id, { onDelete: 'cascade' }),
+    weight: numeric('weight', { precision: 5, scale: 2 }), // e.g. marks or weight percentage (null if unknown)
+    source: varchar('source', { length: 50 }).notNull().default('user'), // user, syllabus, question_paper, inferred
+    notes: text('notes'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index('assessment_topics_assessment_id_idx').on(table.assessmentId),
+    index('assessment_topics_topic_id_idx').on(table.topicId),
+    index('assessment_topics_user_id_idx').on(table.userId),
+    index('assessment_topics_course_id_idx').on(table.courseId),
+    uniqueIndex('assessment_topics_unique_idx').on(table.assessmentId, table.topicId),
+  ],
+);
+
+export type AssessmentTopicRow = typeof assessmentTopics.$inferSelect;
+export type NewAssessmentTopicRow = typeof assessmentTopics.$inferInsert;
 
 /**
  * Table: resources
@@ -273,6 +315,118 @@ export const academicNodes = pgTable(
 
 export type AcademicNodeRow = typeof academicNodes.$inferSelect;
 export type NewAcademicNodeRow = typeof academicNodes.$inferInsert;
+
+/**
+ * Table: academic_node_resources
+ *
+ * Many-to-Many join table linking academic nodes (topics / modules) to supporting resources.
+ * Preserves page provenance (pageStart, pageEnd) to answer: "Which resources/pages support this topic?"
+ */
+export const academicNodeResources = pgTable(
+  'academic_node_resources',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    nodeId: uuid('node_id')
+      .notNull()
+      .references(() => academicNodes.id, { onDelete: 'cascade' }),
+    resourceId: uuid('resource_id')
+      .notNull()
+      .references(() => resources.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    courseId: uuid('course_id')
+      .notNull()
+      .references(() => courses.id, { onDelete: 'cascade' }),
+    pageStart: integer('page_start'),
+    pageEnd: integer('page_end'),
+    relevanceSummary: text('relevance_summary'),
+    origin: varchar('origin', { length: 50 }).notNull().default('model'), // model, user
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index('academic_node_resources_node_id_idx').on(table.nodeId),
+    index('academic_node_resources_resource_id_idx').on(table.resourceId),
+    index('academic_node_resources_course_id_idx').on(table.courseId),
+    index('academic_node_resources_user_id_idx').on(table.userId),
+  ],
+);
+
+export type AcademicNodeResourceRow = typeof academicNodeResources.$inferSelect;
+export type NewAcademicNodeResourceRow = typeof academicNodeResources.$inferInsert;
+
+/**
+ * Table: topic_study_states
+ *
+ * Per-topic factual study progression state.
+ * Scoped to: (user_id, topic_id)
+ * State values: 'not_started' | 'learning' | 'needs_review' | 'reviewed'
+ */
+export const topicStudyStates = pgTable(
+  'topic_study_states',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    courseId: uuid('course_id')
+      .notNull()
+      .references(() => courses.id, { onDelete: 'cascade' }),
+    topicId: uuid('topic_id')
+      .notNull()
+      .references(() => academicNodes.id, { onDelete: 'cascade' }),
+    state: varchar('state', { length: 50 }).notNull().default('not_started'), // not_started, learning, needs_review, reviewed
+    lastStudiedAt: timestamp('last_studied_at', { withTimezone: true }),
+    lastReviewedAt: timestamp('last_reviewed_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('topic_study_states_user_topic_idx').on(table.userId, table.topicId),
+    index('topic_study_states_user_course_idx').on(table.userId, table.courseId),
+  ],
+);
+
+export type TopicStudyStateRow = typeof topicStudyStates.$inferSelect;
+export type NewTopicStudyStateRow = typeof topicStudyStates.$inferInsert;
+
+/**
+ * Table: study_events
+ *
+ * Immutable chronological study activity ledger.
+ * Event types: 'study_started' | 'study_completed' | 'reviewed' | 'marked_needs_review' | 'state_changed'
+ */
+export const studyEvents = pgTable(
+  'study_events',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    courseId: uuid('course_id')
+      .notNull()
+      .references(() => courses.id, { onDelete: 'cascade' }),
+    topicId: uuid('topic_id')
+      .notNull()
+      .references(() => academicNodes.id, { onDelete: 'cascade' }),
+    type: varchar('type', { length: 50 }).notNull(), // study_started, study_completed, reviewed, marked_needs_review, state_changed
+    occurredAt: timestamp('occurred_at', { withTimezone: true }).notNull().defaultNow(),
+    metadata: jsonb('metadata'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index('study_events_user_topic_idx').on(table.userId, table.topicId),
+    index('study_events_user_course_occurred_idx').on(
+      table.userId,
+      table.courseId,
+      table.occurredAt,
+    ),
+  ],
+);
+
+export type StudyEventRow = typeof studyEvents.$inferSelect;
+export type NewStudyEventRow = typeof studyEvents.$inferInsert;
 
 /**
  * Table: job_outbox

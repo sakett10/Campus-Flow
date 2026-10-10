@@ -171,3 +171,44 @@ export function inferAcademicMapNodes(documentText: string): InferredNode[] {
 }
 
 export const classifyDocumentStructure = inferAcademicMapNodes;
+
+/**
+ * Find page provenance for an academic topic across extracted pages.
+ */
+export function findTopicPageProvenance(
+  pages: Array<{ pageNumber: number; text: string }>,
+  topicTitle: string,
+): { pageStart: number | null; pageEnd: number | null } {
+  if (!pages.length || !topicTitle) return { pageStart: null, pageEnd: null };
+  const normalizedTitle = topicTitle.toLowerCase().trim();
+  const matchingPages: number[] = [];
+
+  for (const p of pages) {
+    if (p.text.toLowerCase().includes(normalizedTitle)) {
+      matchingPages.push(p.pageNumber);
+    }
+  }
+
+  if (matchingPages.length === 0) {
+    const significantWords = normalizedTitle
+      .split(/\s+/)
+      .filter((w) => w.length > 4 && !['module', 'chapter', 'topic', 'unit'].includes(w));
+    if (significantWords.length > 0) {
+      for (const p of pages) {
+        const pageLower = p.text.toLowerCase();
+        const matchesWord = significantWords.some((w) => pageLower.includes(w));
+        if (matchesWord && !matchingPages.includes(p.pageNumber)) {
+          matchingPages.push(p.pageNumber);
+        }
+      }
+    }
+  }
+
+  if (matchingPages.length === 0) {
+    return { pageStart: 1, pageEnd: 1 };
+  }
+
+  const pageStart = Math.min(...matchingPages);
+  const pageEnd = Math.max(...matchingPages);
+  return { pageStart, pageEnd };
+}

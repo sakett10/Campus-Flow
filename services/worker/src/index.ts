@@ -1,13 +1,16 @@
 import { Worker, type Job } from 'bullmq';
 import { validateEnv, type EnvConfig } from '@campusflow/config';
 import { createLogger, S3ObjectStorage } from '@campusflow/shared';
-import { PostgresDataStore } from '@campusflow/database';
-import { QUEUE_NAMES } from './queues.js';
+import { PostgresDataStore, PostgresOutboxStore } from '@campusflow/database';
+import { QUEUE_NAMES, createQueues } from './queues.js';
 import { processResourceJob, type ResourceJobPayload } from './processors/resource-processor.js';
+import { OutboxDispatcher } from './dispatcher.js';
 
 const logger = createLogger({ module: 'worker' });
 
 export * from './processors/resource-processor.js';
+export * from './dispatcher.js';
+export * from './queues.js';
 
 let sharedStore: PostgresDataStore | null = null;
 let sharedStorage: S3ObjectStorage | null = null;
@@ -60,7 +63,12 @@ export function startWorkers() {
   const env = validateEnv();
   const redisUrl = env.REDIS_URL;
 
-  logger.info(`Initializing CampusFlow Worker against Redis...`);
+  logger.info(`Initializing CampusFlow Worker & Outbox Dispatcher against Redis...`);
+
+  const queues = createQueues(redisUrl);
+  const outboxStore = new PostgresOutboxStore(env.DATABASE_URL);
+  const dispatcher = new OutboxDispatcher(outboxStore, queues);
+  dispatcher.start();
 
   const workers: Worker[] = [];
 
@@ -80,8 +88,10 @@ export function startWorkers() {
     workers.push(worker);
   }
 
-  logger.info(`CampusFlow Worker active. Listening on ${workers.length} queues.`);
-  return workers;
+  logger.info(
+    `CampusFlow Worker active. Listening on ${workers.length} queues. Outbox dispatcher running.`,
+  );
+  return { workers, dispatcher, queues };
 }
 
 if (process.env['NODE_ENV'] !== 'test') {

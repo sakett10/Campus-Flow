@@ -5,6 +5,7 @@ import { defaultStore } from '../../data/store.js';
 import {
   AppError,
   type ObjectStorage,
+  type OutboxStore,
   createObjectStorageFromEnv,
   normalizeFileName,
   validateFileBytes,
@@ -12,10 +13,18 @@ import {
   TransactionalOutboxManager,
   InMemoryOutboxStore,
 } from '@campusflow/shared';
+import { PostgresOutboxStore } from '@campusflow/database';
+
+export function createOutboxStore(): OutboxStore {
+  if (process.env['NODE_ENV'] !== 'test' && process.env['DATABASE_URL']) {
+    return new PostgresOutboxStore(process.env['DATABASE_URL']);
+  }
+  return new InMemoryOutboxStore();
+}
 
 export const resourcesRouter = new Hono();
 export const sharedStorage: ObjectStorage = createObjectStorageFromEnv();
-export const sharedOutboxStore = new InMemoryOutboxStore();
+export const sharedOutboxStore: OutboxStore = createOutboxStore();
 export const sharedOutboxManager = new TransactionalOutboxManager(sharedOutboxStore);
 
 const uploadUrlSchema = z.object({
@@ -105,7 +114,12 @@ resourcesRouter.post('/', async (c) => {
     throw AppError.forbidden('Object key does not belong to the authenticated user.');
   }
 
-  // 2. Duplicate detection within user's scope
+  // 2. Verify course ownership if courseId is supplied
+  if (parsed.data.courseId) {
+    await defaultStore.getCourse(parsed.data.courseId, session.userId);
+  }
+
+  // 3. Duplicate detection within user's scope
   if (parsed.data.contentHash) {
     const existing = await defaultStore.findResourceByHash(session.userId, parsed.data.contentHash);
     if (existing) {
@@ -133,32 +147,24 @@ resourcesRouter.post('/', async (c) => {
     }
   }
 
-  // 3. Create resource with status 'queued'
-  const resource = await defaultStore.createResource({
-    userId: session.userId,
-    courseId: parsed.data.courseId,
-    title: parsed.data.title,
-    type: parsed.data.type,
-    objectKey: parsed.data.objectKey,
-    mimeType: parsed.data.mimeType,
-    sizeBytes: parsed.data.sizeBytes,
-    contentHash: parsed.data.contentHash,
-    processingStatus: 'queued',
-  });
-
-  // 4. Enqueue durable outbox job for worker processing
-  await sharedOutboxManager.enqueue({
-    queueName: 'resource-processing',
-    payload: {
-      resourceId: resource.id,
+  // 4. Atomically create resource record and enqueue durable outbox job
+  const { resource } = await defaultStore.createResourceWithOutbox(
+    {
       userId: session.userId,
-      courseId: resource.courseId,
-      objectKey: resource.objectKey,
-      mimeType: resource.mimeType,
+      courseId: parsed.data.courseId,
+      title: parsed.data.title,
+      type: parsed.data.type,
+      objectKey: parsed.data.objectKey,
+      mimeType: parsed.data.mimeType,
+      sizeBytes: parsed.data.sizeBytes,
+      contentHash: parsed.data.contentHash,
+      processingStatus: 'queued',
     },
-    idempotencyKey: `process_${resource.id}`,
-    maxAttempts: 3,
-  });
+    {
+      queueName: 'resource-processing',
+      maxAttempts: 3,
+    },
+  );
 
   return c.json(resource, 201);
 });
@@ -192,6 +198,11 @@ resourcesRouter.post('/direct', async (c) => {
   const duplicateAction = (
     typeof formData['duplicateAction'] === 'string' ? formData['duplicateAction'] : 'reject'
   ) as 'reject' | 'replace' | 'keep_both';
+
+  // Verify course ownership before accepting upload
+  if (courseId) {
+    await defaultStore.getCourse(courseId, session.userId);
+  }
 
   let buffer: Buffer;
   let fileName = 'document.pdf';
@@ -239,32 +250,24 @@ resourcesRouter.post('/direct', async (c) => {
   const objectKey = `users/${session.userId}/resources/${Date.now()}_${encodeURIComponent(validation.normalizedFileName)}`;
   await sharedStorage.upload(objectKey, buffer, validation.detectedMimeType);
 
-  // Create resource record
-  const resource = await defaultStore.createResource({
-    userId: session.userId,
-    courseId,
-    title: title || validation.normalizedFileName,
-    type,
-    objectKey,
-    mimeType: validation.detectedMimeType,
-    sizeBytes: validation.sizeBytes,
-    contentHash: validation.contentHash,
-    processingStatus: 'queued',
-  });
-
-  // Enqueue outbox job
-  await sharedOutboxManager.enqueue({
-    queueName: 'resource-processing',
-    payload: {
-      resourceId: resource.id,
+  // Atomically create resource record and enqueue outbox job
+  const { resource } = await defaultStore.createResourceWithOutbox(
+    {
       userId: session.userId,
-      courseId: resource.courseId,
-      objectKey: resource.objectKey,
-      mimeType: resource.mimeType,
+      courseId,
+      title: title || validation.normalizedFileName,
+      type,
+      objectKey,
+      mimeType: validation.detectedMimeType,
+      sizeBytes: validation.sizeBytes,
+      contentHash: validation.contentHash,
+      processingStatus: 'queued',
     },
-    idempotencyKey: `process_${resource.id}`,
-    maxAttempts: 3,
-  });
+    {
+      queueName: 'resource-processing',
+      maxAttempts: 3,
+    },
+  );
 
   return c.json(resource, 201);
 });
@@ -273,30 +276,13 @@ resourcesRouter.post('/direct', async (c) => {
 resourcesRouter.post('/:id/retry', async (c) => {
   const session = getSession(c);
   const id = c.req.param('id');
-  const resource = await defaultStore.getResource(id, session.userId);
 
-  if (resource.processingStatus !== 'failed') {
-    throw AppError.badRequest(
-      `Cannot retry resource with status '${resource.processingStatus}'. Only failed resources can be retried.`,
-    );
-  }
-
-  await defaultStore.updateResourceStatus(id, session.userId, 'queued');
-
-  await sharedOutboxManager.enqueue({
+  const { resource: updated } = await defaultStore.retryResourceWithOutbox(id, session.userId, {
     queueName: 'resource-processing',
-    payload: {
-      resourceId: resource.id,
-      userId: session.userId,
-      courseId: resource.courseId,
-      objectKey: resource.objectKey,
-      mimeType: resource.mimeType,
-    },
-    idempotencyKey: `retry_${resource.id}_${Date.now()}`,
+    idempotencyKey: `retry_${id}_${Date.now()}`,
     maxAttempts: 3,
   });
 
-  const updated = await defaultStore.getResource(id, session.userId);
   return c.json(updated);
 });
 
@@ -304,20 +290,10 @@ resourcesRouter.post('/:id/retry', async (c) => {
 resourcesRouter.delete('/:id', async (c) => {
   const session = getSession(c);
   const id = c.req.param('id');
-  const resource = await defaultStore.getResource(id, session.userId);
 
-  // 1. Delete DB record and chunks
-  await defaultStore.deleteResource(id, session.userId);
-
-  // 2. Enqueue async object storage deletion
-  await sharedOutboxManager.enqueue({
+  await defaultStore.deleteResourceWithOutbox(id, session.userId, {
     queueName: 'resource-processing',
-    payload: {
-      action: 'delete_storage_object',
-      objectKey: resource.objectKey,
-      userId: session.userId,
-    },
-    idempotencyKey: `delete_storage_${resource.id}`,
+    idempotencyKey: `delete_storage_${id}`,
     maxAttempts: 3,
   });
 

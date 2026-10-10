@@ -1,14 +1,19 @@
-import { eq, and, desc, asc, ilike } from 'drizzle-orm';
+import { eq, and, desc, asc, ilike, lte, sql } from 'drizzle-orm';
 import postgres from 'postgres';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import * as schema from './schema.js';
 import type {
   Course,
   Assessment,
+  AssessmentTopicLink,
+  AssessmentLinkedTopic,
+  AssessmentWithTopics,
   Resource,
   User,
   ResourceChunk,
   AcademicNode,
+  AcademicNodeResourceLink,
+  AcademicNodeWithResources,
   SearchResultItem,
   ResourceProcessingStatus,
   Company,
@@ -32,6 +37,13 @@ import type {
   ConceptSkillMapping,
   ConceptSkillMappingSeed,
   VerifiedCompanySeed,
+  JobQueueName,
+  JobOutboxRecord,
+  JobOutboxStatus,
+  TopicStudyState,
+  StudyEvent,
+  StudyStateValue,
+  StudyEventType,
 } from '@campusflow/types';
 
 export class PostgresDataStore {
@@ -168,7 +180,23 @@ export class PostgresDataStore {
   }
 
   // --- Assessments ---
-  async getAssessment(id: string, requesterUserId: string): Promise<Assessment> {
+  mapAssessmentRow(r: schema.AssessmentRow): Assessment {
+    return {
+      id: r.id,
+      userId: r.userId,
+      courseId: r.courseId,
+      title: r.title,
+      type: r.type as Assessment['type'],
+      date: r.date,
+      totalMarks: r.totalMarks ? Number(r.totalMarks) : null,
+      weightage: r.weightage,
+      status: (r.status as Assessment['status']) || 'upcoming',
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
+    };
+  }
+
+  async getAssessment(id: string, requesterUserId: string): Promise<AssessmentWithTopics> {
     const rows = await this.db
       .select()
       .from(schema.assessments)
@@ -177,20 +205,17 @@ export class PostgresDataStore {
     if (!r) {
       throw new Error('Assessment not found.');
     }
+    const assessment = this.mapAssessmentRow(r);
+    const linkedTopics = await this.getAssessmentLinkedTopics(id, r.courseId, requesterUserId);
+
     return {
-      id: r.id,
-      userId: r.userId,
-      courseId: r.courseId,
-      title: r.title,
-      type: r.type as Assessment['type'],
-      date: r.date,
-      weightage: r.weightage,
-      createdAt: r.createdAt,
-      updatedAt: r.updatedAt,
+      ...assessment,
+      topics: linkedTopics,
+      topicCount: linkedTopics.length,
     };
   }
 
-  async listAssessments(userId: string, courseId?: string): Promise<Assessment[]> {
+  async listAssessments(userId: string, courseId?: string): Promise<AssessmentWithTopics[]> {
     const conditions = [eq(schema.assessments.userId, userId)];
     if (courseId) {
       conditions.push(eq(schema.assessments.courseId, courseId));
@@ -198,18 +223,58 @@ export class PostgresDataStore {
     const rows = await this.db
       .select()
       .from(schema.assessments)
-      .where(and(...conditions));
-    return rows.map((r) => ({
-      id: r.id,
-      userId: r.userId,
-      courseId: r.courseId,
-      title: r.title,
-      type: r.type as Assessment['type'],
-      date: r.date,
-      weightage: r.weightage,
-      createdAt: r.createdAt,
-      updatedAt: r.updatedAt,
-    }));
+      .where(and(...conditions))
+      .orderBy(desc(schema.assessments.date), desc(schema.assessments.createdAt));
+
+    const assessments = rows.map((r) => this.mapAssessmentRow(r));
+    const result: AssessmentWithTopics[] = [];
+
+    for (const a of assessments) {
+      const linkedTopics = await this.getAssessmentLinkedTopics(a.id, a.courseId, userId);
+      result.push({
+        ...a,
+        topics: linkedTopics,
+        topicCount: linkedTopics.length,
+      });
+    }
+
+    return result;
+  }
+
+  private async getAssessmentLinkedTopics(
+    assessmentId: string,
+    courseId: string,
+    userId: string,
+  ): Promise<AssessmentLinkedTopic[]> {
+    const linkRows = await this.db
+      .select()
+      .from(schema.assessmentTopics)
+      .where(
+        and(
+          eq(schema.assessmentTopics.assessmentId, assessmentId),
+          eq(schema.assessmentTopics.userId, userId),
+        ),
+      );
+
+    if (linkRows.length === 0) return [];
+
+    const nodes = await this.listAcademicNodes(courseId, userId);
+    const nodeMap = new Map(nodes.map((n) => [n.id, n]));
+
+    return linkRows.map((link) => {
+      const node = nodeMap.get(link.topicId);
+      const parentModule = node?.parentId ? nodeMap.get(node.parentId) : null;
+      return {
+        linkId: link.id,
+        topicId: link.topicId,
+        topicTitle: node?.title || 'Unknown Topic',
+        parentModuleId: node?.parentId || null,
+        parentModuleTitle: parentModule?.title || null,
+        weight: link.weight ? Number(link.weight) : null,
+        source: link.source as AssessmentTopicLink['source'],
+        notes: link.notes,
+      };
+    });
   }
 
   async createAssessment(assessment: {
@@ -218,7 +283,9 @@ export class PostgresDataStore {
     title: string;
     type: Assessment['type'];
     date?: Date | null | undefined;
+    totalMarks?: number | null | undefined;
     weightage?: string | null | undefined;
+    status?: Assessment['status'] | undefined;
   }): Promise<Assessment> {
     const rows = await this.db
       .insert(schema.assessments)
@@ -228,22 +295,123 @@ export class PostgresDataStore {
         title: assessment.title,
         type: assessment.type,
         date: assessment.date ?? null,
+        totalMarks:
+          assessment.totalMarks !== null && assessment.totalMarks !== undefined
+            ? String(assessment.totalMarks)
+            : null,
         weightage: assessment.weightage ?? null,
+        status: assessment.status || 'upcoming',
       })
       .returning();
     const r = rows[0];
     if (!r) throw new Error('Failed to create assessment.');
+    return this.mapAssessmentRow(r);
+  }
+
+  async updateAssessment(
+    id: string,
+    requesterUserId: string,
+    updates: Partial<Assessment>,
+  ): Promise<Assessment> {
+    const values: Partial<schema.NewAssessmentRow> = { updatedAt: new Date() };
+    if (updates.title !== undefined) values.title = updates.title;
+    if (updates.type !== undefined) values.type = updates.type;
+    if (updates.date !== undefined) values.date = updates.date;
+    if (updates.totalMarks !== undefined) {
+      values.totalMarks = updates.totalMarks !== null ? String(updates.totalMarks) : null;
+    }
+    if (updates.weightage !== undefined) values.weightage = updates.weightage;
+    if (updates.status !== undefined) values.status = updates.status;
+
+    const rows = await this.db
+      .update(schema.assessments)
+      .set(values)
+      .where(and(eq(schema.assessments.id, id), eq(schema.assessments.userId, requesterUserId)))
+      .returning();
+    const r = rows[0];
+    if (!r) throw new Error('Assessment not found.');
+    return this.mapAssessmentRow(r);
+  }
+
+  async deleteAssessment(id: string, requesterUserId: string): Promise<void> {
+    await this.db
+      .delete(schema.assessments)
+      .where(and(eq(schema.assessments.id, id), eq(schema.assessments.userId, requesterUserId)));
+  }
+
+  // --- Assessment <-> Topic Linking ---
+  async linkTopicToAssessment(
+    link: Omit<AssessmentTopicLink, 'id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<AssessmentTopicLink> {
+    const rows = await this.db
+      .insert(schema.assessmentTopics)
+      .values({
+        assessmentId: link.assessmentId,
+        topicId: link.topicId,
+        userId: link.userId,
+        courseId: link.courseId,
+        weight: link.weight !== null && link.weight !== undefined ? String(link.weight) : null,
+        source: link.source || 'user',
+        notes: link.notes ?? null,
+      })
+      .returning();
+    const r = rows[0];
+    if (!r) throw new Error('Failed to link topic to assessment.');
     return {
       id: r.id,
+      assessmentId: r.assessmentId,
+      topicId: r.topicId,
       userId: r.userId,
       courseId: r.courseId,
-      title: r.title,
-      type: r.type as Assessment['type'],
-      date: r.date,
-      weightage: r.weightage,
+      weight: r.weight ? Number(r.weight) : null,
+      source: r.source as AssessmentTopicLink['source'],
+      notes: r.notes,
       createdAt: r.createdAt,
       updatedAt: r.updatedAt,
     };
+  }
+
+  async listTopicsForAssessment(
+    assessmentId: string,
+    requesterUserId: string,
+  ): Promise<AssessmentTopicLink[]> {
+    const rows = await this.db
+      .select()
+      .from(schema.assessmentTopics)
+      .where(
+        and(
+          eq(schema.assessmentTopics.assessmentId, assessmentId),
+          eq(schema.assessmentTopics.userId, requesterUserId),
+        ),
+      );
+    return rows.map((r) => ({
+      id: r.id,
+      assessmentId: r.assessmentId,
+      topicId: r.topicId,
+      userId: r.userId,
+      courseId: r.courseId,
+      weight: r.weight ? Number(r.weight) : null,
+      source: r.source as AssessmentTopicLink['source'],
+      notes: r.notes,
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
+    }));
+  }
+
+  async unlinkTopicFromAssessment(
+    assessmentId: string,
+    topicId: string,
+    requesterUserId: string,
+  ): Promise<void> {
+    await this.db
+      .delete(schema.assessmentTopics)
+      .where(
+        and(
+          eq(schema.assessmentTopics.assessmentId, assessmentId),
+          eq(schema.assessmentTopics.topicId, topicId),
+          eq(schema.assessmentTopics.userId, requesterUserId),
+        ),
+      );
   }
 
   // --- Resources ---
@@ -385,6 +553,240 @@ export class PostgresDataStore {
       .where(and(eq(schema.resources.id, id), eq(schema.resources.userId, requesterUserId)));
   }
 
+  // --- Transactional Resource + Outbox Operations ---
+  async createResourceWithOutbox(
+    resource: {
+      userId: string;
+      courseId?: string | null | undefined;
+      title: string;
+      type: Resource['type'];
+      objectKey: string;
+      mimeType: string;
+      sizeBytes?: number | null | undefined;
+      contentHash?: string | null | undefined;
+      pageCount?: number | null | undefined;
+      processingStatus?: Resource['processingStatus'];
+    },
+    outboxJob: {
+      queueName: JobQueueName;
+      payload?: Record<string, unknown>;
+      idempotencyKey?: string;
+      maxAttempts?: number;
+      scheduledAt?: Date;
+      simulateFailure?: boolean;
+    },
+  ): Promise<{ resource: Resource; job: JobOutboxRecord }> {
+    return await this.db.transaction(async (tx) => {
+      // 1. Insert Resource
+      const resRows = await tx
+        .insert(schema.resources)
+        .values({
+          userId: resource.userId,
+          courseId: resource.courseId ?? null,
+          title: resource.title,
+          type: resource.type,
+          objectKey: resource.objectKey,
+          mimeType: resource.mimeType,
+          sizeBytes: resource.sizeBytes ?? null,
+          contentHash: resource.contentHash ?? null,
+          pageCount: resource.pageCount ?? null,
+          processingStatus: resource.processingStatus || 'queued',
+        })
+        .returning();
+      const r = resRows[0];
+      if (!r) throw new Error('Failed to create resource.');
+      const createdResource = this.mapResourceRow(r);
+
+      // 2. Prepare payload & idempotency key
+      const payload: Record<string, unknown> = {
+        ...(outboxJob.payload || {}),
+        resourceId: createdResource.id,
+        userId: createdResource.userId,
+        courseId: createdResource.courseId,
+        objectKey: createdResource.objectKey,
+        mimeType: createdResource.mimeType,
+      };
+      const idempotencyKey = outboxJob.idempotencyKey || `process_${createdResource.id}`;
+
+      // 3. Deduplicate / insert outbox job
+      const existingJob = await tx
+        .select()
+        .from(schema.jobOutbox)
+        .where(
+          and(
+            eq(schema.jobOutbox.queueName, outboxJob.queueName),
+            eq(schema.jobOutbox.idempotencyKey, idempotencyKey),
+          ),
+        );
+
+      let jobRecord: JobOutboxRecord;
+      if (existingJob[0]) {
+        jobRecord = this.mapJobRow(existingJob[0]);
+      } else {
+        const jobRows = await tx
+          .insert(schema.jobOutbox)
+          .values({
+            queueName: outboxJob.queueName,
+            payload,
+            idempotencyKey,
+            status: 'pending',
+            attempts: 0,
+            maxAttempts: outboxJob.maxAttempts ?? 3,
+            scheduledAt: outboxJob.scheduledAt ?? new Date(),
+          })
+          .returning();
+        const j = jobRows[0];
+        if (!j) throw new Error('Failed to create outbox job record.');
+        jobRecord = this.mapJobRow(j);
+      }
+
+      if (outboxJob.simulateFailure) {
+        throw new Error('SIMULATED_TRANSACTION_FAILURE');
+      }
+
+      return { resource: createdResource, job: jobRecord };
+    });
+  }
+
+  async retryResourceWithOutbox(
+    resourceId: string,
+    requesterUserId: string,
+    outboxJob: {
+      queueName: JobQueueName;
+      payload?: Record<string, unknown>;
+      idempotencyKey?: string;
+      maxAttempts?: number;
+      scheduledAt?: Date;
+      simulateFailure?: boolean;
+    },
+  ): Promise<{ resource: Resource; job: JobOutboxRecord }> {
+    return await this.db.transaction(async (tx) => {
+      const rows = await tx
+        .select()
+        .from(schema.resources)
+        .where(
+          and(eq(schema.resources.id, resourceId), eq(schema.resources.userId, requesterUserId)),
+        );
+      const existing = rows[0];
+      if (!existing) {
+        throw new Error('Resource not found or unauthorized.');
+      }
+      if (existing.processingStatus !== 'failed') {
+        throw new Error(
+          `Cannot retry resource with status '${existing.processingStatus}'. Only failed resources can be retried.`,
+        );
+      }
+
+      const updatedRows = await tx
+        .update(schema.resources)
+        .set({
+          processingStatus: 'queued',
+          updatedAt: new Date(),
+        })
+        .where(
+          and(eq(schema.resources.id, resourceId), eq(schema.resources.userId, requesterUserId)),
+        )
+        .returning();
+      const updatedResource = this.mapResourceRow(updatedRows[0]!);
+
+      const payload: Record<string, unknown> = {
+        ...(outboxJob.payload || {}),
+        resourceId: updatedResource.id,
+        userId: updatedResource.userId,
+        courseId: updatedResource.courseId,
+        objectKey: updatedResource.objectKey,
+        mimeType: updatedResource.mimeType,
+      };
+      const idempotencyKey = outboxJob.idempotencyKey || `retry_${resourceId}_${Date.now()}`;
+
+      const jobRows = await tx
+        .insert(schema.jobOutbox)
+        .values({
+          queueName: outboxJob.queueName,
+          payload,
+          idempotencyKey,
+          status: 'pending',
+          attempts: 0,
+          maxAttempts: outboxJob.maxAttempts ?? 3,
+          scheduledAt: outboxJob.scheduledAt ?? new Date(),
+        })
+        .returning();
+      const j = jobRows[0];
+      if (!j) throw new Error('Failed to create outbox job record.');
+
+      if (outboxJob.simulateFailure) {
+        throw new Error('SIMULATED_TRANSACTION_FAILURE');
+      }
+
+      return { resource: updatedResource, job: this.mapJobRow(j) };
+    });
+  }
+
+  async deleteResourceWithOutbox(
+    resourceId: string,
+    requesterUserId: string,
+    outboxJob: {
+      queueName: JobQueueName;
+      payload?: Record<string, unknown>;
+      idempotencyKey?: string;
+      maxAttempts?: number;
+      scheduledAt?: Date;
+      simulateFailure?: boolean;
+    },
+  ): Promise<{ job: JobOutboxRecord }> {
+    return await this.db.transaction(async (tx) => {
+      const rows = await tx
+        .select()
+        .from(schema.resources)
+        .where(
+          and(eq(schema.resources.id, resourceId), eq(schema.resources.userId, requesterUserId)),
+        );
+      const existing = rows[0];
+      if (!existing) {
+        throw new Error('Resource not found or unauthorized.');
+      }
+
+      await tx
+        .delete(schema.resourceChunks)
+        .where(eq(schema.resourceChunks.resourceId, resourceId));
+
+      await tx
+        .delete(schema.resources)
+        .where(
+          and(eq(schema.resources.id, resourceId), eq(schema.resources.userId, requesterUserId)),
+        );
+
+      const payload: Record<string, unknown> = {
+        ...(outboxJob.payload || {}),
+        action: 'delete_storage_object',
+        objectKey: existing.objectKey,
+        userId: requesterUserId,
+      };
+      const idempotencyKey = outboxJob.idempotencyKey || `delete_storage_${resourceId}`;
+
+      const jobRows = await tx
+        .insert(schema.jobOutbox)
+        .values({
+          queueName: outboxJob.queueName,
+          payload,
+          idempotencyKey,
+          status: 'pending',
+          attempts: 0,
+          maxAttempts: outboxJob.maxAttempts ?? 3,
+          scheduledAt: outboxJob.scheduledAt ?? new Date(),
+        })
+        .returning();
+      const j = jobRows[0];
+      if (!j) throw new Error('Failed to create outbox job record.');
+
+      if (outboxJob.simulateFailure) {
+        throw new Error('SIMULATED_TRANSACTION_FAILURE');
+      }
+
+      return { job: this.mapJobRow(j) };
+    });
+  }
+
   // --- Chunks & Full-Text Search ---
   async createChunks(
     chunks: Array<Omit<ResourceChunk, 'id' | 'createdAt'>>,
@@ -407,6 +809,7 @@ export class PostgresDataStore {
           tokenCount: c.tokenCount ?? null,
           extractionVersion: c.extractionVersion || 'v1',
           chunkingVersion: c.chunkingVersion || 'v1',
+          searchVector: sql`to_tsvector('english', ${c.content})`,
         })
         .returning();
       const r = rows[0];
@@ -474,7 +877,7 @@ export class PostgresDataStore {
     const trimmed = query.trim();
     if (!trimmed) return [];
 
-    // Native PostgreSQL Full-Text Search using plainto_tsquery
+    // Native PostgreSQL Full-Text Search using plainto_tsquery and stored tsvector with GIN index
     const results = await this.rawSql<
       Array<{
         id: string;
@@ -495,12 +898,12 @@ export class PostgresDataStore {
         rc.page_start,
         rc.page_end,
         r.title as resource_title,
-        ts_rank_cd(to_tsvector('english', rc.content), plainto_tsquery('english', ${trimmed})) as rank
+        ts_rank_cd(rc.search_vector, plainto_tsquery('english', ${trimmed})) as rank
       FROM resource_chunks rc
       JOIN resources r ON r.id = rc.resource_id
       WHERE rc.user_id = ${userId}
         ${courseId ? this.rawSql`AND rc.course_id = ${courseId}` : this.rawSql``}
-        AND to_tsvector('english', rc.content) @@ plainto_tsquery('english', ${trimmed})
+        AND rc.search_vector @@ plainto_tsquery('english', ${trimmed})
       ORDER BY rank DESC
       LIMIT 20;
     `;
@@ -610,6 +1013,8 @@ export class PostgresDataStore {
     if (updates.description !== undefined) values.description = updates.description;
     if (updates.orderIndex !== undefined) values.orderIndex = updates.orderIndex;
     if (updates.needsReview !== undefined) values.needsReview = updates.needsReview;
+    if (updates.parentId !== undefined) values.parentId = updates.parentId;
+    if (updates.origin !== undefined) values.origin = updates.origin;
 
     const rows = await this.db
       .update(schema.academicNodes)
@@ -643,6 +1048,458 @@ export class PostgresDataStore {
       .where(
         and(eq(schema.academicNodes.id, id), eq(schema.academicNodes.userId, requesterUserId)),
       );
+  }
+
+  // --- Academic Node <-> Resource Linking ---
+  async linkResourceToAcademicNode(
+    link: Omit<AcademicNodeResourceLink, 'id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<AcademicNodeResourceLink> {
+    const rows = await this.db
+      .insert(schema.academicNodeResources)
+      .values({
+        nodeId: link.nodeId,
+        resourceId: link.resourceId,
+        userId: link.userId,
+        courseId: link.courseId,
+        pageStart: link.pageStart ?? null,
+        pageEnd: link.pageEnd ?? null,
+        relevanceSummary: link.relevanceSummary ?? null,
+        origin: link.origin || 'model',
+      })
+      .returning();
+    const r = rows[0];
+    if (!r) throw new Error('Failed to link resource to academic node.');
+    return {
+      id: r.id,
+      nodeId: r.nodeId,
+      resourceId: r.resourceId,
+      userId: r.userId,
+      courseId: r.courseId,
+      pageStart: r.pageStart,
+      pageEnd: r.pageEnd,
+      relevanceSummary: r.relevanceSummary,
+      origin: r.origin as AcademicNodeResourceLink['origin'],
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
+    };
+  }
+
+  async listResourceLinksForNode(
+    nodeId: string,
+    requesterUserId: string,
+  ): Promise<AcademicNodeResourceLink[]> {
+    const rows = await this.db
+      .select()
+      .from(schema.academicNodeResources)
+      .where(
+        and(
+          eq(schema.academicNodeResources.nodeId, nodeId),
+          eq(schema.academicNodeResources.userId, requesterUserId),
+        ),
+      );
+    return rows.map((r) => ({
+      id: r.id,
+      nodeId: r.nodeId,
+      resourceId: r.resourceId,
+      userId: r.userId,
+      courseId: r.courseId,
+      pageStart: r.pageStart,
+      pageEnd: r.pageEnd,
+      relevanceSummary: r.relevanceSummary,
+      origin: r.origin as AcademicNodeResourceLink['origin'],
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
+    }));
+  }
+
+  async listResourceLinksForCourse(
+    courseId: string,
+    requesterUserId: string,
+  ): Promise<AcademicNodeResourceLink[]> {
+    const rows = await this.db
+      .select()
+      .from(schema.academicNodeResources)
+      .where(
+        and(
+          eq(schema.academicNodeResources.courseId, courseId),
+          eq(schema.academicNodeResources.userId, requesterUserId),
+        ),
+      );
+    return rows.map((r) => ({
+      id: r.id,
+      nodeId: r.nodeId,
+      resourceId: r.resourceId,
+      userId: r.userId,
+      courseId: r.courseId,
+      pageStart: r.pageStart,
+      pageEnd: r.pageEnd,
+      relevanceSummary: r.relevanceSummary,
+      origin: r.origin as AcademicNodeResourceLink['origin'],
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
+    }));
+  }
+
+  async listNodeLinksForResource(
+    resourceId: string,
+    requesterUserId: string,
+  ): Promise<AcademicNodeResourceLink[]> {
+    const rows = await this.db
+      .select()
+      .from(schema.academicNodeResources)
+      .where(
+        and(
+          eq(schema.academicNodeResources.resourceId, resourceId),
+          eq(schema.academicNodeResources.userId, requesterUserId),
+        ),
+      );
+    return rows.map((r) => ({
+      id: r.id,
+      nodeId: r.nodeId,
+      resourceId: r.resourceId,
+      userId: r.userId,
+      courseId: r.courseId,
+      pageStart: r.pageStart,
+      pageEnd: r.pageEnd,
+      relevanceSummary: r.relevanceSummary,
+      origin: r.origin as AcademicNodeResourceLink['origin'],
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
+    }));
+  }
+
+  async deleteResourceLink(id: string, requesterUserId: string): Promise<void> {
+    await this.db
+      .delete(schema.academicNodeResources)
+      .where(
+        and(
+          eq(schema.academicNodeResources.id, id),
+          eq(schema.academicNodeResources.userId, requesterUserId),
+        ),
+      );
+  }
+
+  async listAcademicNodesWithResources(
+    courseId: string,
+    requesterUserId: string,
+  ): Promise<AcademicNodeWithResources[]> {
+    const nodes = await this.listAcademicNodes(courseId, requesterUserId);
+    if (nodes.length === 0) return [];
+
+    const links = await this.listResourceLinksForCourse(courseId, requesterUserId);
+    const resources = await this.listResources(requesterUserId, courseId);
+    const resourceMap = new Map(resources.map((r) => [r.id, r]));
+
+    const stateRows = await this.db
+      .select()
+      .from(schema.topicStudyStates)
+      .where(
+        and(
+          eq(schema.topicStudyStates.courseId, courseId),
+          eq(schema.topicStudyStates.userId, requesterUserId),
+        ),
+      );
+    const stateMap = new Map(stateRows.map((r) => [r.topicId, this.mapTopicStudyStateRow(r)]));
+
+    return nodes.map((node) => {
+      const nodeLinks = links.filter((l) => l.nodeId === node.id);
+      const linkedResources = nodeLinks.map((link) => {
+        const res = resourceMap.get(link.resourceId);
+        return {
+          linkId: link.id,
+          resourceId: link.resourceId,
+          resourceTitle: res?.title || 'Unknown Resource',
+          resourceType: res?.type || 'document',
+          pageStart: link.pageStart,
+          pageEnd: link.pageEnd,
+          origin: link.origin,
+        };
+      });
+
+      return {
+        ...node,
+        resources: linkedResources,
+        studyState: stateMap.get(node.id) || null,
+      };
+    });
+  }
+
+  // --- Study State & Events ---
+  private mapTopicStudyStateRow(r: schema.TopicStudyStateRow): TopicStudyState {
+    return {
+      id: r.id,
+      userId: r.userId,
+      courseId: r.courseId,
+      topicId: r.topicId,
+      state: r.state as StudyStateValue,
+      lastStudiedAt: r.lastStudiedAt,
+      lastReviewedAt: r.lastReviewedAt,
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
+    };
+  }
+
+  private mapStudyEventRow(r: schema.StudyEventRow): StudyEvent {
+    return {
+      id: r.id,
+      userId: r.userId,
+      courseId: r.courseId,
+      topicId: r.topicId,
+      type: r.type as StudyEventType,
+      occurredAt: r.occurredAt,
+      metadata: (r.metadata as Record<string, unknown>) || null,
+      createdAt: r.createdAt,
+    };
+  }
+
+  async getTopicStudyState(
+    courseId: string,
+    topicId: string,
+    requesterUserId: string,
+  ): Promise<TopicStudyState> {
+    await this.getCourse(courseId, requesterUserId);
+
+    const nodeRows = await this.db
+      .select()
+      .from(schema.academicNodes)
+      .where(
+        and(
+          eq(schema.academicNodes.id, topicId),
+          eq(schema.academicNodes.userId, requesterUserId),
+          eq(schema.academicNodes.courseId, courseId),
+        ),
+      );
+    const node = nodeRows[0];
+    if (!node) {
+      throw new Error('Topic node not found in this course.');
+    }
+
+    const rows = await this.db
+      .select()
+      .from(schema.topicStudyStates)
+      .where(
+        and(
+          eq(schema.topicStudyStates.topicId, topicId),
+          eq(schema.topicStudyStates.userId, requesterUserId),
+        ),
+      );
+
+    if (rows.length > 0 && rows[0]) {
+      return this.mapTopicStudyStateRow(rows[0]);
+    }
+
+    const now = new Date();
+    return {
+      id: crypto.randomUUID(),
+      userId: requesterUserId,
+      courseId,
+      topicId,
+      state: 'not_started',
+      lastStudiedAt: null,
+      lastReviewedAt: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+  }
+
+  async listCourseStudyStates(
+    courseId: string,
+    requesterUserId: string,
+  ): Promise<TopicStudyState[]> {
+    await this.getCourse(courseId, requesterUserId);
+
+    const nodes = await this.listAcademicNodes(courseId, requesterUserId);
+    const topicNodes = nodes.filter((n) => n.type === 'topic');
+
+    const stateRows = await this.db
+      .select()
+      .from(schema.topicStudyStates)
+      .where(
+        and(
+          eq(schema.topicStudyStates.courseId, courseId),
+          eq(schema.topicStudyStates.userId, requesterUserId),
+        ),
+      );
+
+    const stateMap = new Map(stateRows.map((r) => [r.topicId, this.mapTopicStudyStateRow(r)]));
+
+    return topicNodes.map((topic) => {
+      const existing = stateMap.get(topic.id);
+      if (existing) return existing;
+      const now = new Date();
+      return {
+        id: crypto.randomUUID(),
+        userId: requesterUserId,
+        courseId,
+        topicId: topic.id,
+        state: 'not_started',
+        lastStudiedAt: null,
+        lastReviewedAt: null,
+        createdAt: now,
+        updatedAt: now,
+      };
+    });
+  }
+
+  async setTopicStudyState(
+    courseId: string,
+    topicId: string,
+    requesterUserId: string,
+    state: StudyStateValue,
+    eventType?: StudyEventType,
+    metadata?: Record<string, unknown> | null,
+  ): Promise<{ studyState: TopicStudyState; event: StudyEvent }> {
+    await this.getCourse(courseId, requesterUserId);
+
+    const nodeRows = await this.db
+      .select()
+      .from(schema.academicNodes)
+      .where(
+        and(
+          eq(schema.academicNodes.id, topicId),
+          eq(schema.academicNodes.userId, requesterUserId),
+          eq(schema.academicNodes.courseId, courseId),
+        ),
+      );
+    const node = nodeRows[0];
+    if (!node) {
+      throw new Error('Topic node not found in this course.');
+    }
+
+    const existingRows = await this.db
+      .select()
+      .from(schema.topicStudyStates)
+      .where(
+        and(
+          eq(schema.topicStudyStates.topicId, topicId),
+          eq(schema.topicStudyStates.userId, requesterUserId),
+        ),
+      );
+    const existing = existingRows[0];
+
+    const now = new Date();
+    let lastStudiedAt = existing?.lastStudiedAt ?? null;
+    let lastReviewedAt = existing?.lastReviewedAt ?? null;
+
+    if (state === 'learning') {
+      lastStudiedAt = now;
+    } else if (state === 'reviewed') {
+      lastReviewedAt = now;
+      lastStudiedAt = now;
+    }
+
+    let savedStateRow: schema.TopicStudyStateRow;
+    if (existing) {
+      const updatedRows = await this.db
+        .update(schema.topicStudyStates)
+        .set({
+          state,
+          lastStudiedAt,
+          lastReviewedAt,
+          updatedAt: now,
+        })
+        .where(eq(schema.topicStudyStates.id, existing.id))
+        .returning();
+      savedStateRow = updatedRows[0]!;
+    } else {
+      const insertedRows = await this.db
+        .insert(schema.topicStudyStates)
+        .values({
+          userId: requesterUserId,
+          courseId,
+          topicId,
+          state,
+          lastStudiedAt,
+          lastReviewedAt,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning();
+      savedStateRow = insertedRows[0]!;
+    }
+
+    const effectiveEventType: StudyEventType =
+      eventType ||
+      (state === 'reviewed'
+        ? 'reviewed'
+        : state === 'needs_review'
+          ? 'marked_needs_review'
+          : state === 'learning'
+            ? 'study_started'
+            : 'state_changed');
+
+    const eventRows = await this.db
+      .insert(schema.studyEvents)
+      .values({
+        userId: requesterUserId,
+        courseId,
+        topicId,
+        type: effectiveEventType,
+        occurredAt: now,
+        metadata: metadata ? (metadata as Record<string, unknown>) : null,
+      })
+      .returning();
+
+    const savedEventRow = eventRows[0]!;
+
+    return {
+      studyState: this.mapTopicStudyStateRow(savedStateRow),
+      event: this.mapStudyEventRow(savedEventRow),
+    };
+  }
+
+  async recordStudyEvent(
+    courseId: string,
+    topicId: string,
+    requesterUserId: string,
+    type: StudyEventType,
+    metadata?: Record<string, unknown> | null,
+  ): Promise<{ studyState: TopicStudyState; event: StudyEvent }> {
+    let targetState: StudyStateValue = 'learning';
+    if (type === 'reviewed') {
+      targetState = 'reviewed';
+    } else if (type === 'marked_needs_review') {
+      targetState = 'needs_review';
+    } else if (type === 'study_completed') {
+      targetState = 'learning';
+    }
+
+    return this.setTopicStudyState(courseId, topicId, requesterUserId, targetState, type, metadata);
+  }
+
+  async listStudyEvents(
+    courseId: string,
+    topicId: string,
+    requesterUserId: string,
+  ): Promise<StudyEvent[]> {
+    await this.getCourse(courseId, requesterUserId);
+
+    const nodeRows = await this.db
+      .select()
+      .from(schema.academicNodes)
+      .where(
+        and(
+          eq(schema.academicNodes.id, topicId),
+          eq(schema.academicNodes.userId, requesterUserId),
+          eq(schema.academicNodes.courseId, courseId),
+        ),
+      );
+    if (!nodeRows[0]) {
+      throw new Error('Topic node not found in this course.');
+    }
+
+    const rows = await this.db
+      .select()
+      .from(schema.studyEvents)
+      .where(
+        and(
+          eq(schema.studyEvents.topicId, topicId),
+          eq(schema.studyEvents.userId, requesterUserId),
+        ),
+      )
+      .orderBy(desc(schema.studyEvents.occurredAt), desc(schema.studyEvents.createdAt));
+
+    return rows.map((r) => this.mapStudyEventRow(r));
   }
 
   // --- Role Families ---
@@ -1716,17 +2573,7 @@ export class PostgresDataStore {
       .from(schema.assessments)
       .where(eq(schema.assessments.userId, userId))
       .orderBy(desc(schema.assessments.date));
-    return rows.map((r) => ({
-      id: r.id,
-      userId: r.userId,
-      courseId: r.courseId,
-      title: r.title,
-      type: r.type as Assessment['type'],
-      date: r.date,
-      weightage: r.weightage,
-      createdAt: r.createdAt,
-      updatedAt: r.updatedAt,
-    }));
+    return rows.map((r) => this.mapAssessmentRow(r));
   }
 
   async listAllAcademicNodesForUser(userId: string): Promise<AcademicNode[]> {
@@ -2272,6 +3119,165 @@ export class PostgresDataStore {
       processedAt: r.processedAt,
       extractionVersion: r.extractionVersion,
       processingStatus: r.processingStatus as Resource['processingStatus'],
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
+    };
+  }
+
+  private mapJobRow(r: schema.JobOutboxRow): JobOutboxRecord {
+    return {
+      id: r.id,
+      queueName: r.queueName as JobQueueName,
+      payload: r.payload as Record<string, unknown>,
+      idempotencyKey: r.idempotencyKey,
+      status: r.status as JobOutboxStatus,
+      attempts: r.attempts,
+      maxAttempts: r.maxAttempts,
+      lastError: r.lastError,
+      lockedAt: r.lockedAt,
+      lockedBy: r.lockedBy,
+      scheduledAt: r.scheduledAt,
+      completedAt: r.completedAt,
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
+    };
+  }
+}
+
+export class PostgresOutboxStore {
+  private readonly db: ReturnType<typeof drizzle<typeof schema>>;
+  private readonly rawSql?: postgres.Sql;
+
+  constructor(databaseUrlOrDb: string | ReturnType<typeof drizzle<typeof schema>>) {
+    if (typeof databaseUrlOrDb === 'string') {
+      this.rawSql = postgres(databaseUrlOrDb, {
+        max: 10,
+        idle_timeout: 20,
+        connect_timeout: 10,
+      });
+      this.db = drizzle(this.rawSql, { schema });
+    } else {
+      this.db = databaseUrlOrDb;
+    }
+  }
+
+  async createJob(
+    data: Omit<JobOutboxRecord, 'id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<JobOutboxRecord> {
+    const rows = await this.db
+      .insert(schema.jobOutbox)
+      .values({
+        queueName: data.queueName,
+        payload: data.payload,
+        idempotencyKey: data.idempotencyKey,
+        status: data.status || 'pending',
+        attempts: data.attempts ?? 0,
+        maxAttempts: data.maxAttempts ?? 3,
+        lastError: data.lastError ?? null,
+        lockedAt: data.lockedAt ?? null,
+        lockedBy: data.lockedBy ?? null,
+        scheduledAt: data.scheduledAt ?? new Date(),
+        completedAt: data.completedAt ?? null,
+      })
+      .returning();
+    const r = rows[0];
+    if (!r) throw new Error('Failed to create outbox job record.');
+    return this.mapJobRow(r);
+  }
+
+  async getJob(id: string): Promise<JobOutboxRecord | null> {
+    const rows = await this.db.select().from(schema.jobOutbox).where(eq(schema.jobOutbox.id, id));
+    const r = rows[0];
+    if (!r) return null;
+    return this.mapJobRow(r);
+  }
+
+  async getJobByIdempotencyKey(
+    queueName: JobQueueName,
+    idempotencyKey: string,
+  ): Promise<JobOutboxRecord | null> {
+    const rows = await this.db
+      .select()
+      .from(schema.jobOutbox)
+      .where(
+        and(
+          eq(schema.jobOutbox.queueName, queueName),
+          eq(schema.jobOutbox.idempotencyKey, idempotencyKey),
+        ),
+      );
+    const r = rows[0];
+    if (!r) return null;
+    return this.mapJobRow(r);
+  }
+
+  async updateJobStatus(
+    id: string,
+    status: JobOutboxStatus,
+    extra: Partial<JobOutboxRecord> = {},
+  ): Promise<JobOutboxRecord> {
+    const values: Partial<schema.NewJobOutboxRow> = {
+      status,
+      updatedAt: new Date(),
+    };
+    if (extra.attempts !== undefined) values.attempts = extra.attempts;
+    if (extra.maxAttempts !== undefined) values.maxAttempts = extra.maxAttempts;
+    if (extra.lastError !== undefined) values.lastError = extra.lastError;
+    if (extra.lockedAt !== undefined) values.lockedAt = extra.lockedAt;
+    if (extra.lockedBy !== undefined) values.lockedBy = extra.lockedBy;
+    if (extra.scheduledAt !== undefined) values.scheduledAt = extra.scheduledAt;
+    if (extra.completedAt !== undefined) values.completedAt = extra.completedAt;
+
+    const rows = await this.db
+      .update(schema.jobOutbox)
+      .set(values)
+      .where(eq(schema.jobOutbox.id, id))
+      .returning();
+    const r = rows[0];
+    if (!r) throw new Error(`Job ${id} not found.`);
+    return this.mapJobRow(r);
+  }
+
+  async listPending(limit = 50): Promise<JobOutboxRecord[]> {
+    const now = new Date();
+    const rows = await this.db
+      .select()
+      .from(schema.jobOutbox)
+      .where(and(eq(schema.jobOutbox.status, 'pending'), lte(schema.jobOutbox.scheduledAt, now)))
+      .orderBy(asc(schema.jobOutbox.scheduledAt))
+      .limit(limit);
+    return rows.map((r) => this.mapJobRow(r));
+  }
+
+  async listStaleRunning(staleBefore: Date): Promise<JobOutboxRecord[]> {
+    const rows = await this.db
+      .select()
+      .from(schema.jobOutbox)
+      .where(
+        and(eq(schema.jobOutbox.status, 'running'), lte(schema.jobOutbox.lockedAt, staleBefore)),
+      );
+    return rows.map((r) => this.mapJobRow(r));
+  }
+
+  async close(): Promise<void> {
+    if (this.rawSql) {
+      await this.rawSql.end();
+    }
+  }
+
+  private mapJobRow(r: schema.JobOutboxRow): JobOutboxRecord {
+    return {
+      id: r.id,
+      queueName: r.queueName as JobQueueName,
+      payload: r.payload as Record<string, unknown>,
+      idempotencyKey: r.idempotencyKey,
+      status: r.status as JobOutboxStatus,
+      attempts: r.attempts,
+      maxAttempts: r.maxAttempts,
+      lastError: r.lastError,
+      lockedAt: r.lockedAt,
+      lockedBy: r.lockedBy,
+      scheduledAt: r.scheduledAt,
+      completedAt: r.completedAt,
       createdAt: r.createdAt,
       updatedAt: r.updatedAt,
     };

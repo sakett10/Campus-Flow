@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { createApiApp } from '../../services/api/src/app.js';
 import { defaultStore } from '../../services/api/src/data/store.js';
+import { sharedOutboxManager } from '../../services/api/src/modules/resources/index.js';
 
 describe('Comprehensive Security & Authorization Audit', () => {
   const userA = '11111111-1111-4111-a111-111111111111';
@@ -243,5 +244,154 @@ describe('Comprehensive Security & Authorization Audit', () => {
     expect(survivingResource).toBeDefined();
     expect(survivingResource.id).toBe(resource.id);
     expect(survivingResource.courseId).toBeNull();
+  });
+
+  it('COURSE IDOR: User A cannot attach a resource to User B course via POST /resources', async () => {
+    const courseB = await defaultStore.createCourse({
+      userId: userB,
+      code: 'CS201',
+      title: 'Data Structures',
+    });
+
+    const res = await app.request('/api/v1/resources', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-test-user-id': userA,
+      },
+      body: JSON.stringify({
+        courseId: courseB.id,
+        title: 'User A attempting to hijack Course B.pdf',
+        type: 'lecture_notes',
+        objectKey: `users/${userA}/resources/hijack.pdf`,
+        mimeType: 'application/pdf',
+      }),
+    });
+
+    expect(res.status).toBe(403);
+    const body = await res.json();
+    expect(body.code).toBe('FORBIDDEN');
+
+    // Verify NO resource was created for User A or User B
+    const resourcesA = await defaultStore.listResources(userA);
+    const resourcesB = await defaultStore.listResources(userB);
+    expect(resourcesA).toHaveLength(0);
+    expect(resourcesB).toHaveLength(0);
+
+    // Verify NO outbox job was enqueued
+    const pendingJobs = await sharedOutboxManager.getStore().listPending();
+    expect(pendingJobs.filter((j) => j.payload['userId'] === userA)).toHaveLength(0);
+  });
+
+  it('COURSE ATTACH: User A can attach a resource to User A own course via POST /resources', async () => {
+    const courseA = await defaultStore.createCourse({
+      userId: userA,
+      code: 'CS101',
+      title: 'Intro to CS',
+    });
+
+    const res = await app.request('/api/v1/resources', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-test-user-id': userA,
+      },
+      body: JSON.stringify({
+        courseId: courseA.id,
+        title: 'Syllabus.pdf',
+        type: 'syllabus',
+        objectKey: `users/${userA}/resources/syllabus.pdf`,
+        mimeType: 'application/pdf',
+      }),
+    });
+
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.courseId).toBe(courseA.id);
+    expect(body.userId).toBe(userA);
+
+    const resourcesA = await defaultStore.listResources(userA);
+    expect(resourcesA).toHaveLength(1);
+    expect(resourcesA[0]?.id).toBe(body.id);
+  });
+
+  it('COURSE IDOR (DIRECT): User A cannot attach a direct upload to User B course via POST /resources/direct', async () => {
+    const courseB = await defaultStore.createCourse({
+      userId: userB,
+      code: 'CS202',
+      title: 'Algorithms',
+    });
+
+    const formData = new FormData();
+    formData.append(
+      'file',
+      new Blob(['Algorithms lecture notes content for testing.'], { type: 'text/plain' }),
+      'notes.txt',
+    );
+    formData.append('courseId', courseB.id);
+    formData.append('title', 'Direct Upload Notes');
+    formData.append('type', 'lecture_notes');
+
+    const res = await app.request('/api/v1/resources/direct', {
+      method: 'POST',
+      headers: {
+        'x-test-user-id': userA,
+      },
+      body: formData,
+    });
+
+    expect(res.status).toBe(403);
+    const body = await res.json();
+    expect(body.code).toBe('FORBIDDEN');
+
+    // Verify NO resource was created
+    const resourcesA = await defaultStore.listResources(userA);
+    expect(resourcesA).toHaveLength(0);
+  });
+
+  it('COURSE ATTACH (DIRECT): User A can attach a direct upload to User A own course via POST /resources/direct', async () => {
+    const courseA = await defaultStore.createCourse({
+      userId: userA,
+      code: 'CS102',
+      title: 'Operating Systems',
+    });
+
+    const formData = new FormData();
+    formData.append(
+      'file',
+      new Blob(['Operating Systems lecture notes content for testing.'], { type: 'text/plain' }),
+      'os_notes.txt',
+    );
+    formData.append('courseId', courseA.id);
+    formData.append('title', 'OS Notes');
+    formData.append('type', 'lecture_notes');
+
+    const res = await app.request('/api/v1/resources/direct', {
+      method: 'POST',
+      headers: {
+        'x-test-user-id': userA,
+      },
+      body: formData,
+    });
+
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.courseId).toBe(courseA.id);
+    expect(body.userId).toBe(userA);
+  });
+
+  it('FAKE INGESTION ENDPOINT: POST /api/v1/ingestion/enqueue no longer exists and returns 404', async () => {
+    const res = await app.request('/api/v1/ingestion/enqueue', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-test-user-id': userA,
+      },
+      body: JSON.stringify({
+        resourceId: '11111111-1111-4111-a111-111111111111',
+      }),
+    });
+
+    expect(res.status).toBe(404);
   });
 });

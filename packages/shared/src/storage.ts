@@ -205,6 +205,8 @@ export class InMemoryObjectStorage implements ObjectStorage {
 
 export function createObjectStorageFromEnv(): ObjectStorage {
   if (
+    process.env.NODE_ENV !== 'test' &&
+    process.env.STORAGE_USE_IN_MEMORY !== 'true' &&
     process.env.STORAGE_ENDPOINT &&
     process.env.STORAGE_BUCKET &&
     process.env.STORAGE_ACCESS_KEY &&

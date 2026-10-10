@@ -11,11 +11,23 @@ import {
   AlertCircle,
   RefreshCw,
 } from 'lucide-react';
-import { fetchCourse, fetchResources, fetchAcademicMap, deleteResource } from '@/lib/api';
+import {
+  fetchCourse,
+  fetchResources,
+  fetchAcademicMap,
+  fetchAssessments,
+  deleteResource,
+} from '@/lib/api';
 import { UploadDropzone } from '@/components/UploadDropzone';
 import { AcademicMapTree } from '@/components/AcademicMapTree';
+import { AssessmentManager } from '@/components/AssessmentManager';
 import { StatusBadge } from '@/components/StatusBadge';
-import type { Course, Resource, AcademicNode } from '@campusflow/types';
+import type {
+  Course,
+  Resource,
+  AcademicNodeWithResources,
+  AssessmentWithTopics,
+} from '@campusflow/types';
 
 export default function CourseDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const resolvedParams = use(params);
@@ -23,7 +35,8 @@ export default function CourseDetailPage({ params }: { params: Promise<{ id: str
 
   const [course, setCourse] = useState<Course | null>(null);
   const [resources, setResources] = useState<Resource[]>([]);
-  const [academicNodes, setAcademicNodes] = useState<AcademicNode[]>([]);
+  const [academicNodes, setAcademicNodes] = useState<AcademicNodeWithResources[]>([]);
+  const [assessments, setAssessments] = useState<AssessmentWithTopics[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
@@ -32,14 +45,16 @@ export default function CourseDetailPage({ params }: { params: Promise<{ id: str
     try {
       setLoading(true);
       setError(null);
-      const [c, r, m] = await Promise.all([
+      const [c, r, m, a] = await Promise.all([
         fetchCourse(courseId),
         fetchResources(courseId),
         fetchAcademicMap(courseId),
+        fetchAssessments(courseId),
       ]);
       setCourse(c);
       setResources(r);
       setAcademicNodes(m);
+      setAssessments(a);
     } catch (err: unknown) {
       console.error(err);
       const msg = err instanceof Error ? err.message : 'Failed to load course details';
@@ -102,7 +117,7 @@ export default function CourseDetailPage({ params }: { params: Promise<{ id: str
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-8">
       {/* Back button & Course Heading */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 pb-6 border-b border-[var(--cf-border)]">
         <div>
@@ -153,7 +168,7 @@ export default function CourseDetailPage({ params }: { params: Promise<{ id: str
       {/* Two Column Layout: Left (Upload & Resources) | Right (Academic Map) */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         {/* Left Column: Resources and Upload Dropzone */}
-        <div className="lg:col-span-7 space-y-6">
+        <div className="lg:col-span-6 space-y-6">
           {/* Upload Dropzone */}
           <div>
             <h2 className="text-xs font-semibold uppercase tracking-wider text-[var(--cf-text-secondary)] font-mono mb-3 flex items-center gap-2">
@@ -233,7 +248,7 @@ export default function CourseDetailPage({ params }: { params: Promise<{ id: str
         </div>
 
         {/* Right Column: Academic Map Tree */}
-        <div className="lg:col-span-5 space-y-3">
+        <div className="lg:col-span-6 space-y-3">
           <AcademicMapTree
             courseId={course.id}
             courseTitle={course.title}
@@ -241,6 +256,17 @@ export default function CourseDetailPage({ params }: { params: Promise<{ id: str
             onNodeUpdated={loadData}
           />
         </div>
+      </div>
+
+      {/* Full Width Section: Assessment & Academic Topics Linkage */}
+      <div className="pt-6 border-t border-[var(--cf-border)]">
+        <AssessmentManager
+          courseId={course.id}
+          courseTitle={course.title}
+          assessments={assessments}
+          academicNodes={academicNodes}
+          onAssessmentsUpdated={loadData}
+        />
       </div>
     </div>
   );

@@ -10,7 +10,6 @@ import { usersRouter } from './modules/users/index.js';
 import { coursesRouter } from './modules/courses/index.js';
 import { assessmentsRouter } from './modules/assessments/index.js';
 import { resourcesRouter } from './modules/resources/index.js';
-import { ingestionRouter } from './modules/ingestion/index.js';
 import { searchRouter } from './modules/search/index.js';
 import { preparationRouter } from './modules/preparation/index.js';
 import { sessionsRouter } from './modules/sessions/index.js';
@@ -42,7 +41,6 @@ export function createApiApp() {
   api.route('/courses', coursesRouter);
   api.route('/assessments', assessmentsRouter);
   api.route('/resources', resourcesRouter);
-  api.route('/ingestion', ingestionRouter);
   api.route('/search', searchRouter);
   api.route('/preparation', preparationRouter);
   api.route('/sessions', sessionsRouter);

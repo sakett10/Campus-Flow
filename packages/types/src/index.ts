@@ -46,7 +46,9 @@ export interface Course {
   updatedAt: Date;
 }
 
-export type AssessmentType = 'CAT' | 'FAT' | 'Quiz' | 'Assignment' | 'Lab' | 'Other';
+export type AssessmentType = 'CAT' | 'FAT' | 'Quiz' | 'Assignment' | 'Project' | 'Lab' | 'Other';
+export type AssessmentStatus = 'upcoming' | 'completed' | 'cancelled';
+export type AssessmentTopicSource = 'user' | 'syllabus' | 'question_paper' | 'inferred';
 
 export interface Assessment {
   id: string;
@@ -55,9 +57,40 @@ export interface Assessment {
   title: string;
   type: AssessmentType;
   date: Date | null;
-  weightage: string | null; // e.g. "15.00"
+  totalMarks?: number | null | undefined;
+  weightage?: string | null | undefined; // e.g. "15.00"
+  status: AssessmentStatus;
   createdAt: Date;
   updatedAt: Date;
+}
+
+export interface AssessmentTopicLink {
+  id: string;
+  assessmentId: string;
+  topicId: string;
+  userId: string;
+  courseId: string;
+  weight?: number | null | undefined;
+  source: AssessmentTopicSource;
+  notes?: string | null | undefined;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface AssessmentLinkedTopic {
+  linkId: string;
+  topicId: string;
+  topicTitle: string;
+  parentModuleId?: string | null | undefined;
+  parentModuleTitle?: string | null | undefined;
+  weight?: number | null | undefined;
+  source: AssessmentTopicSource;
+  notes?: string | null | undefined;
+}
+
+export interface AssessmentWithTopics extends Assessment {
+  topics?: AssessmentLinkedTopic[];
+  topicCount?: number;
 }
 
 export type ResourceType = 'syllabus' | 'lecture_notes' | 'question_bank' | 'reference_material';
@@ -117,6 +150,63 @@ export interface AcademicNode {
   needsReview: 'yes' | 'no';
   createdAt: Date;
   updatedAt: Date;
+}
+
+export interface AcademicNodeResourceLink {
+  id: string;
+  nodeId: string;
+  resourceId: string;
+  userId: string;
+  courseId: string;
+  pageStart?: number | null | undefined;
+  pageEnd?: number | null | undefined;
+  relevanceSummary?: string | null | undefined;
+  origin: NodeOrigin;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface AcademicNodeLinkedResource {
+  linkId: string;
+  resourceId: string;
+  resourceTitle: string;
+  resourceType: string;
+  pageStart?: number | null | undefined;
+  pageEnd?: number | null | undefined;
+  origin: NodeOrigin;
+}
+
+export type StudyStateValue = 'not_started' | 'learning' | 'needs_review' | 'reviewed';
+
+export type StudyEventType =
+  'study_started' | 'study_completed' | 'reviewed' | 'marked_needs_review' | 'state_changed';
+
+export interface TopicStudyState {
+  id: string;
+  userId: string;
+  courseId: string;
+  topicId: string;
+  state: StudyStateValue;
+  lastStudiedAt: Date | null;
+  lastReviewedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface StudyEvent {
+  id: string;
+  userId: string;
+  courseId: string;
+  topicId: string;
+  type: StudyEventType;
+  occurredAt: Date;
+  metadata?: Record<string, unknown> | null | undefined;
+  createdAt: Date;
+}
+
+export interface AcademicNodeWithResources extends AcademicNode {
+  resources?: AcademicNodeLinkedResource[];
+  studyState?: TopicStudyState | null | undefined;
 }
 
 export interface SearchResultItem {

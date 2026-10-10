@@ -1,10 +1,15 @@
 import {
   type Course,
   type Assessment,
+  type AssessmentTopicLink,
+  type AssessmentLinkedTopic,
+  type AssessmentWithTopics,
   type Resource,
   type User,
   type ResourceChunk,
   type AcademicNode,
+  type AcademicNodeResourceLink,
+  type AcademicNodeWithResources,
   type SearchResultItem,
   type Company,
   type RoleFamily,
@@ -33,11 +38,24 @@ import {
   type ModelCard,
   type ModelApprovalStatus,
   type OutcomeTarget,
+  type JobOutboxRecord,
   INITIAL_ROLE_FAMILIES,
   VERIFIED_COMPANIES_SEED,
   CANONICAL_CONCEPT_SKILL_MAPPINGS,
+  TopicStudyState,
+  StudyEvent,
+  StudyStateValue,
+  StudyEventType,
 } from '@campusflow/types';
-import { AppError, isValidUuid, assertOwnership, sanitizeSearchQuery } from '@campusflow/shared';
+import {
+  AppError,
+  isValidUuid,
+  assertOwnership,
+  sanitizeSearchQuery,
+  type EnqueueJobOptions,
+  type OutboxStore,
+  InMemoryOutboxStore,
+} from '@campusflow/shared';
 
 /**
  * DataStore abstraction: provides atomic, validated data access with strict
@@ -60,16 +78,36 @@ export interface DataStore {
   deleteCourse(id: string, requesterUserId: string): Promise<void>;
 
   // Assessments
-  getAssessment(id: string, requesterUserId: string): Promise<Assessment>;
-  listAssessments(userId: string, courseId?: string): Promise<Assessment[]>;
+  getAssessment(id: string, requesterUserId: string): Promise<AssessmentWithTopics>;
+  listAssessments(userId: string, courseId?: string): Promise<AssessmentWithTopics[]>;
   createAssessment(assessment: {
     userId: string;
     courseId: string;
     title: string;
     type: Assessment['type'];
     date?: Date | null | undefined;
+    totalMarks?: number | null | undefined;
     weightage?: string | null | undefined;
+    status?: Assessment['status'] | undefined;
   }): Promise<Assessment>;
+  updateAssessment(
+    id: string,
+    requesterUserId: string,
+    updates: Partial<Assessment>,
+  ): Promise<Assessment>;
+  deleteAssessment(id: string, requesterUserId: string): Promise<void>;
+  linkTopicToAssessment(
+    link: Omit<AssessmentTopicLink, 'id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<AssessmentTopicLink>;
+  listTopicsForAssessment(
+    assessmentId: string,
+    requesterUserId: string,
+  ): Promise<AssessmentTopicLink[]>;
+  unlinkTopicFromAssessment(
+    assessmentId: string,
+    topicId: string,
+    requesterUserId: string,
+  ): Promise<void>;
 
   // Resources
   getResource(id: string, requesterUserId: string): Promise<Resource>;
@@ -87,6 +125,21 @@ export interface DataStore {
     pageCount?: number | null | undefined;
     processingStatus?: Resource['processingStatus'];
   }): Promise<Resource>;
+  createResourceWithOutbox(
+    resource: {
+      userId: string;
+      courseId?: string | null | undefined;
+      title: string;
+      type: Resource['type'];
+      objectKey: string;
+      mimeType: string;
+      sizeBytes?: number | null | undefined;
+      contentHash?: string | null | undefined;
+      pageCount?: number | null | undefined;
+      processingStatus?: Resource['processingStatus'];
+    },
+    outboxJob: EnqueueJobOptions,
+  ): Promise<{ resource: Resource; job: JobOutboxRecord }>;
   updateResource(
     id: string,
     requesterUserId: string,
@@ -98,7 +151,17 @@ export interface DataStore {
     status: Resource['processingStatus'],
     extra?: { errorMessage?: string | null; pageCount?: number | null },
   ): Promise<Resource>;
+  retryResourceWithOutbox(
+    resourceId: string,
+    requesterUserId: string,
+    outboxJob: EnqueueJobOptions,
+  ): Promise<{ resource: Resource; job: JobOutboxRecord }>;
   deleteResource(id: string, requesterUserId: string): Promise<void>;
+  deleteResourceWithOutbox(
+    resourceId: string,
+    requesterUserId: string,
+    outboxJob: EnqueueJobOptions,
+  ): Promise<{ job: JobOutboxRecord }>;
 
   // Chunks & FTS
   createChunks(chunks: Array<Omit<ResourceChunk, 'id' | 'createdAt'>>): Promise<ResourceChunk[]>;
@@ -121,6 +184,54 @@ export interface DataStore {
     updates: Partial<AcademicNode>,
   ): Promise<AcademicNode>;
   deleteAcademicNode(id: string, requesterUserId: string): Promise<void>;
+  linkResourceToAcademicNode(
+    link: Omit<AcademicNodeResourceLink, 'id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<AcademicNodeResourceLink>;
+  listResourceLinksForNode(
+    nodeId: string,
+    requesterUserId: string,
+  ): Promise<AcademicNodeResourceLink[]>;
+  listResourceLinksForCourse(
+    courseId: string,
+    requesterUserId: string,
+  ): Promise<AcademicNodeResourceLink[]>;
+  listNodeLinksForResource(
+    resourceId: string,
+    requesterUserId: string,
+  ): Promise<AcademicNodeResourceLink[]>;
+  deleteResourceLink(id: string, requesterUserId: string): Promise<void>;
+  listAcademicNodesWithResources(
+    courseId: string,
+    requesterUserId: string,
+  ): Promise<AcademicNodeWithResources[]>;
+
+  // Study State & Events
+  getTopicStudyState(
+    courseId: string,
+    topicId: string,
+    requesterUserId: string,
+  ): Promise<TopicStudyState>;
+  listCourseStudyStates(courseId: string, requesterUserId: string): Promise<TopicStudyState[]>;
+  setTopicStudyState(
+    courseId: string,
+    topicId: string,
+    requesterUserId: string,
+    state: StudyStateValue,
+    eventType?: StudyEventType,
+    metadata?: Record<string, unknown> | null,
+  ): Promise<{ studyState: TopicStudyState; event: StudyEvent }>;
+  recordStudyEvent(
+    courseId: string,
+    topicId: string,
+    requesterUserId: string,
+    type: StudyEventType,
+    metadata?: Record<string, unknown> | null,
+  ): Promise<{ studyState: TopicStudyState; event: StudyEvent }>;
+  listStudyEvents(
+    courseId: string,
+    topicId: string,
+    requesterUserId: string,
+  ): Promise<StudyEvent[]>;
 
   deleteUser(id: string): Promise<void>;
 
@@ -316,9 +427,13 @@ export class InMemoryDataStore implements DataStore {
   private users: Map<string, User> = new Map();
   private courses: Map<string, Course> = new Map();
   private assessments: Map<string, Assessment> = new Map();
+  private assessmentTopics: Map<string, AssessmentTopicLink> = new Map();
   private resources: Map<string, Resource> = new Map();
   private chunks: Map<string, ResourceChunk> = new Map();
   private academicNodes: Map<string, AcademicNode> = new Map();
+  private academicNodeResources: Map<string, AcademicNodeResourceLink> = new Map();
+  private topicStudyStates: Map<string, TopicStudyState> = new Map();
+  private studyEvents: Map<string, StudyEvent> = new Map();
   private roleFamilies: Map<string, RoleFamily> = new Map();
   private companies: Map<string, Company> = new Map();
   private skills: Map<string, Skill> = new Map();
@@ -339,12 +454,22 @@ export class InMemoryDataStore implements DataStore {
   private opportunitySnapshots: Map<string, OpportunitySnapshot> = new Map();
   private modelRegistryEntries: Map<string, ModelRegistryEntry> = new Map();
   private modelCards: Map<string, ModelCard> = new Map();
+  private outboxStore: OutboxStore;
 
-  constructor() {
+  constructor(outboxStore?: OutboxStore) {
+    this.outboxStore = outboxStore || new InMemoryOutboxStore();
     this.seedInitialRoleFamilies();
     this.seedVerifiedCompanies();
     this.seedConceptSkillMappings();
     this.seedCanonicalSkills();
+  }
+
+  setOutboxStore(store: OutboxStore): void {
+    this.outboxStore = store;
+  }
+
+  getOutboxStore(): OutboxStore {
+    return this.outboxStore;
   }
 
   private seedInitialRoleFamilies(): void {
@@ -517,17 +642,37 @@ export class InMemoryDataStore implements DataStore {
     const course = await this.getCourse(id, requesterUserId);
     this.courses.delete(course.id);
 
-    // Cascade delete child assessments
+    // Cascade delete child assessments and assessment topic links
     for (const [aId, assessment] of this.assessments.entries()) {
       if (assessment.courseId === course.id) {
         this.assessments.delete(aId);
       }
     }
+    for (const [atId, link] of this.assessmentTopics.entries()) {
+      if (link.courseId === course.id) {
+        this.assessmentTopics.delete(atId);
+      }
+    }
 
-    // Cascade delete academic nodes
+    // Cascade delete academic nodes & links
     for (const [nId, node] of this.academicNodes.entries()) {
       if (node.courseId === course.id) {
         this.academicNodes.delete(nId);
+      }
+    }
+    for (const [lId, link] of this.academicNodeResources.entries()) {
+      if (link.courseId === course.id) {
+        this.academicNodeResources.delete(lId);
+      }
+    }
+    for (const [sId, state] of this.topicStudyStates.entries()) {
+      if (state.courseId === course.id) {
+        this.topicStudyStates.delete(sId);
+      }
+    }
+    for (const [eId, event] of this.studyEvents.entries()) {
+      if (event.courseId === course.id) {
+        this.studyEvents.delete(eId);
       }
     }
 
@@ -540,7 +685,36 @@ export class InMemoryDataStore implements DataStore {
     }
   }
 
-  async getAssessment(id: string, requesterUserId: string): Promise<Assessment> {
+  private buildAssessmentWithTopics(
+    assessment: Assessment,
+    requesterUserId: string,
+  ): AssessmentWithTopics {
+    const links = Array.from(this.assessmentTopics.values()).filter(
+      (l) => l.assessmentId === assessment.id && l.userId === requesterUserId,
+    );
+    const topics: AssessmentLinkedTopic[] = [];
+    for (const l of links) {
+      const node = this.academicNodes.get(l.topicId);
+      const parentModule = node?.parentId ? this.academicNodes.get(node.parentId) : null;
+      topics.push({
+        linkId: l.id,
+        topicId: l.topicId,
+        topicTitle: node?.title || 'Unknown Topic',
+        parentModuleId: node?.parentId || null,
+        parentModuleTitle: parentModule?.title || null,
+        weight: l.weight,
+        source: l.source,
+        notes: l.notes,
+      });
+    }
+    return {
+      ...assessment,
+      topics,
+      topicCount: topics.length,
+    };
+  }
+
+  async getAssessment(id: string, requesterUserId: string): Promise<AssessmentWithTopics> {
     if (!isValidUuid(id)) {
       throw AppError.badRequest('Invalid assessment ID format: must be a valid UUID.');
     }
@@ -549,16 +723,17 @@ export class InMemoryDataStore implements DataStore {
       throw AppError.notFound('Assessment not found.');
     }
     assertOwnership(assessment.userId, requesterUserId, 'Assessment');
-    return assessment;
+    return this.buildAssessmentWithTopics(assessment, requesterUserId);
   }
 
-  async listAssessments(userId: string, courseId?: string): Promise<Assessment[]> {
+  async listAssessments(userId: string, courseId?: string): Promise<AssessmentWithTopics[]> {
     if (!isValidUuid(userId)) {
       throw AppError.badRequest('Invalid user ID format.');
     }
-    return Array.from(this.assessments.values()).filter(
+    const filtered = Array.from(this.assessments.values()).filter(
       (a) => a.userId === userId && (!courseId || a.courseId === courseId),
     );
+    return filtered.map((a) => this.buildAssessmentWithTopics(a, userId));
   }
 
   async createAssessment(data: {
@@ -567,7 +742,9 @@ export class InMemoryDataStore implements DataStore {
     title: string;
     type: Assessment['type'];
     date?: Date | null | undefined;
+    totalMarks?: number | null | undefined;
     weightage?: string | null | undefined;
+    status?: Assessment['status'] | undefined;
   }): Promise<Assessment> {
     await this.getCourse(data.courseId, data.userId);
 
@@ -580,12 +757,148 @@ export class InMemoryDataStore implements DataStore {
       title: data.title,
       type: data.type,
       date: data.date || null,
+      totalMarks: data.totalMarks ?? null,
       weightage: data.weightage || null,
+      status: data.status || 'upcoming',
       createdAt: now,
       updatedAt: now,
     };
     this.assessments.set(id, assessment);
     return assessment;
+  }
+
+  async updateAssessment(
+    id: string,
+    requesterUserId: string,
+    updates: Partial<Assessment>,
+  ): Promise<Assessment> {
+    if (!isValidUuid(id)) {
+      throw AppError.badRequest('Invalid assessment ID format: must be a valid UUID.');
+    }
+    const existing = this.assessments.get(id);
+    if (!existing) {
+      throw AppError.notFound('Assessment not found.');
+    }
+    assertOwnership(existing.userId, requesterUserId, 'Assessment');
+
+    const updated: Assessment = {
+      ...existing,
+      ...updates,
+      id: existing.id,
+      userId: existing.userId,
+      courseId: existing.courseId,
+      updatedAt: new Date(),
+    };
+    this.assessments.set(id, updated);
+    return updated;
+  }
+
+  async deleteAssessment(id: string, requesterUserId: string): Promise<void> {
+    if (!isValidUuid(id)) {
+      throw AppError.badRequest('Invalid assessment ID format: must be a valid UUID.');
+    }
+    const assessment = this.assessments.get(id);
+    if (!assessment) {
+      throw AppError.notFound('Assessment not found.');
+    }
+    assertOwnership(assessment.userId, requesterUserId, 'Assessment');
+
+    this.assessments.delete(id);
+
+    // Cascade delete assessment topic links
+    for (const [linkId, link] of this.assessmentTopics.entries()) {
+      if (link.assessmentId === id) {
+        this.assessmentTopics.delete(linkId);
+      }
+    }
+  }
+
+  async linkTopicToAssessment(
+    link: Omit<AssessmentTopicLink, 'id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<AssessmentTopicLink> {
+    if (
+      !isValidUuid(link.assessmentId) ||
+      !isValidUuid(link.topicId) ||
+      !isValidUuid(link.userId) ||
+      !isValidUuid(link.courseId)
+    ) {
+      throw AppError.badRequest('Invalid ID format for assessment topic linking.');
+    }
+
+    const assessment = this.assessments.get(link.assessmentId);
+    if (!assessment) {
+      throw AppError.notFound('Assessment not found.');
+    }
+    assertOwnership(assessment.userId, link.userId, 'Assessment');
+
+    const node = this.academicNodes.get(link.topicId);
+    if (!node) {
+      throw AppError.notFound('Topic node not found.');
+    }
+    assertOwnership(node.userId, link.userId, 'AcademicNode');
+
+    if (node.courseId !== assessment.courseId || link.courseId !== assessment.courseId) {
+      throw AppError.badRequest('Topic does not belong to the assessment course.');
+    }
+
+    // Check if already linked
+    for (const existingLink of this.assessmentTopics.values()) {
+      if (
+        existingLink.assessmentId === link.assessmentId &&
+        existingLink.topicId === link.topicId
+      ) {
+        existingLink.weight = link.weight !== undefined ? link.weight : existingLink.weight;
+        existingLink.source = link.source || existingLink.source;
+        existingLink.notes = link.notes !== undefined ? link.notes : existingLink.notes;
+        existingLink.updatedAt = new Date();
+        return existingLink;
+      }
+    }
+
+    const id = crypto.randomUUID();
+    const now = new Date();
+    const record: AssessmentTopicLink = {
+      id,
+      assessmentId: link.assessmentId,
+      topicId: link.topicId,
+      userId: link.userId,
+      courseId: link.courseId,
+      weight: link.weight !== undefined ? link.weight : null,
+      source: link.source || 'user',
+      notes: link.notes || null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.assessmentTopics.set(id, record);
+    return record;
+  }
+
+  async listTopicsForAssessment(
+    assessmentId: string,
+    requesterUserId: string,
+  ): Promise<AssessmentTopicLink[]> {
+    await this.getAssessment(assessmentId, requesterUserId);
+    return Array.from(this.assessmentTopics.values()).filter(
+      (l) => l.assessmentId === assessmentId && l.userId === requesterUserId,
+    );
+  }
+
+  async unlinkTopicFromAssessment(
+    assessmentId: string,
+    topicId: string,
+    requesterUserId: string,
+  ): Promise<void> {
+    await this.getAssessment(assessmentId, requesterUserId);
+    for (const [linkId, link] of this.assessmentTopics.entries()) {
+      if (
+        link.assessmentId === assessmentId &&
+        link.topicId === topicId &&
+        link.userId === requesterUserId
+      ) {
+        this.assessmentTopics.delete(linkId);
+        return;
+      }
+    }
   }
 
   async getResource(id: string, requesterUserId: string): Promise<Resource> {
@@ -712,6 +1025,187 @@ export class InMemoryDataStore implements DataStore {
     const resource = await this.getResource(id, requesterUserId);
     this.resources.delete(resource.id);
     await this.deleteChunksByResource(resource.id);
+    for (const [lId, link] of this.academicNodeResources.entries()) {
+      if (link.resourceId === resource.id) {
+        this.academicNodeResources.delete(lId);
+      }
+    }
+  }
+
+  async createResourceWithOutbox(
+    data: {
+      userId: string;
+      courseId?: string | null | undefined;
+      title: string;
+      type: Resource['type'];
+      objectKey: string;
+      mimeType: string;
+      sizeBytes?: number | null | undefined;
+      contentHash?: string | null | undefined;
+      pageCount?: number | null | undefined;
+      processingStatus?: Resource['processingStatus'];
+    },
+    outboxJob: EnqueueJobOptions,
+  ): Promise<{ resource: Resource; job: JobOutboxRecord }> {
+    const resource = await this.createResource(data);
+    let job: JobOutboxRecord | undefined;
+    let createdNewJob = false;
+
+    try {
+      const payload: Record<string, unknown> = {
+        ...(outboxJob.payload || {}),
+        resourceId: resource.id,
+        userId: resource.userId,
+        courseId: resource.courseId,
+        objectKey: resource.objectKey,
+        mimeType: resource.mimeType,
+      };
+      const idempotencyKey = outboxJob.idempotencyKey || `process_${resource.id}`;
+
+      // Check if job already exists with this idempotency key
+      const existing = await this.outboxStore.getJobByIdempotencyKey(
+        outboxJob.queueName,
+        idempotencyKey,
+      );
+      if (existing) {
+        job = existing;
+      } else {
+        job = await this.outboxStore.createJob({
+          queueName: outboxJob.queueName,
+          payload,
+          idempotencyKey,
+          status: 'pending',
+          attempts: 0,
+          maxAttempts: outboxJob.maxAttempts ?? 3,
+          scheduledAt: outboxJob.scheduledAt ?? new Date(),
+        });
+        createdNewJob = true;
+      }
+
+      if (outboxJob.simulateFailure) {
+        throw new Error('SIMULATED_TRANSACTION_FAILURE');
+      }
+
+      return { resource, job };
+    } catch (err) {
+      // Rollback in-memory mutations
+      this.resources.delete(resource.id);
+      if (createdNewJob && job && this.outboxStore.deleteJob) {
+        await this.outboxStore.deleteJob(job.id);
+      }
+      throw err;
+    }
+  }
+
+  async retryResourceWithOutbox(
+    resourceId: string,
+    requesterUserId: string,
+    outboxJob: EnqueueJobOptions,
+  ): Promise<{ resource: Resource; job: JobOutboxRecord }> {
+    const resource = await this.getResource(resourceId, requesterUserId);
+    if (resource.processingStatus !== 'failed') {
+      throw AppError.badRequest(
+        `Cannot retry resource with status '${resource.processingStatus}'. Only failed resources can be retried.`,
+      );
+    }
+
+    const previousStatus = resource.processingStatus;
+    const previousUpdatedAt = resource.updatedAt;
+
+    resource.processingStatus = 'queued';
+    resource.updatedAt = new Date();
+
+    let job: JobOutboxRecord | undefined;
+
+    try {
+      const payload: Record<string, unknown> = {
+        ...(outboxJob.payload || {}),
+        resourceId: resource.id,
+        userId: resource.userId,
+        courseId: resource.courseId,
+        objectKey: resource.objectKey,
+        mimeType: resource.mimeType,
+      };
+      const idempotencyKey = outboxJob.idempotencyKey || `retry_${resourceId}_${Date.now()}`;
+
+      job = await this.outboxStore.createJob({
+        queueName: outboxJob.queueName,
+        payload,
+        idempotencyKey,
+        status: 'pending',
+        attempts: 0,
+        maxAttempts: outboxJob.maxAttempts ?? 3,
+        scheduledAt: outboxJob.scheduledAt ?? new Date(),
+      });
+
+      if (outboxJob.simulateFailure) {
+        throw new Error('SIMULATED_TRANSACTION_FAILURE');
+      }
+
+      return { resource, job };
+    } catch (err) {
+      // Rollback status
+      resource.processingStatus = previousStatus;
+      resource.updatedAt = previousUpdatedAt;
+      if (job && this.outboxStore.deleteJob) {
+        await this.outboxStore.deleteJob(job.id);
+      }
+      throw err;
+    }
+  }
+
+  async deleteResourceWithOutbox(
+    resourceId: string,
+    requesterUserId: string,
+    outboxJob: EnqueueJobOptions,
+  ): Promise<{ job: JobOutboxRecord }> {
+    const resource = await this.getResource(resourceId, requesterUserId);
+    const existingChunks = Array.from(this.chunks.values()).filter(
+      (c) => c.resourceId === resourceId,
+    );
+
+    this.resources.delete(resource.id);
+    for (const chunk of existingChunks) {
+      this.chunks.delete(chunk.id);
+    }
+
+    let job: JobOutboxRecord | undefined;
+
+    try {
+      const payload: Record<string, unknown> = {
+        ...(outboxJob.payload || {}),
+        action: 'delete_storage_object',
+        objectKey: resource.objectKey,
+        userId: requesterUserId,
+      };
+      const idempotencyKey = outboxJob.idempotencyKey || `delete_storage_${resourceId}`;
+
+      job = await this.outboxStore.createJob({
+        queueName: outboxJob.queueName,
+        payload,
+        idempotencyKey,
+        status: 'pending',
+        attempts: 0,
+        maxAttempts: outboxJob.maxAttempts ?? 3,
+        scheduledAt: outboxJob.scheduledAt ?? new Date(),
+      });
+
+      if (outboxJob.simulateFailure) {
+        throw new Error('SIMULATED_TRANSACTION_FAILURE');
+      }
+
+      return { job };
+    } catch (err) {
+      // Rollback resource and chunks
+      this.resources.set(resource.id, resource);
+      for (const chunk of existingChunks) {
+        this.chunks.set(chunk.id, chunk);
+      }
+      if (job && this.outboxStore.deleteJob) {
+        await this.outboxStore.deleteJob(job.id);
+      }
+      throw err;
+    }
   }
 
   // Chunks & FTS
@@ -883,6 +1377,316 @@ export class InMemoryDataStore implements DataStore {
     }
     assertOwnership(node.userId, requesterUserId, 'AcademicNode');
     this.academicNodes.delete(id);
+
+    // Cascade delete child nodes (topics) if module is deleted
+    for (const [childId, childNode] of this.academicNodes.entries()) {
+      if (childNode.parentId === id) {
+        this.academicNodes.delete(childId);
+      }
+    }
+
+    // Cascade delete links, assessment topics, and study states
+    for (const [linkId, link] of this.academicNodeResources.entries()) {
+      if (link.nodeId === id) {
+        this.academicNodeResources.delete(linkId);
+      }
+    }
+    for (const [atId, link] of this.assessmentTopics.entries()) {
+      if (link.topicId === id) {
+        this.assessmentTopics.delete(atId);
+      }
+    }
+    for (const [sId, state] of this.topicStudyStates.entries()) {
+      if (state.topicId === id) {
+        this.topicStudyStates.delete(sId);
+      }
+    }
+    for (const [eId, event] of this.studyEvents.entries()) {
+      if (event.topicId === id) {
+        this.studyEvents.delete(eId);
+      }
+    }
+  }
+
+  // --- Academic Node <-> Resource Linking ---
+  async linkResourceToAcademicNode(
+    link: Omit<AcademicNodeResourceLink, 'id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<AcademicNodeResourceLink> {
+    const id = crypto.randomUUID();
+    const now = new Date();
+    const record: AcademicNodeResourceLink = {
+      ...link,
+      id,
+      pageStart: link.pageStart ?? null,
+      pageEnd: link.pageEnd ?? null,
+      relevanceSummary: link.relevanceSummary ?? null,
+      origin: link.origin || 'model',
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.academicNodeResources.set(id, record);
+    return record;
+  }
+
+  async listResourceLinksForNode(
+    nodeId: string,
+    requesterUserId: string,
+  ): Promise<AcademicNodeResourceLink[]> {
+    return Array.from(this.academicNodeResources.values()).filter(
+      (l) => l.nodeId === nodeId && l.userId === requesterUserId,
+    );
+  }
+
+  async listResourceLinksForCourse(
+    courseId: string,
+    requesterUserId: string,
+  ): Promise<AcademicNodeResourceLink[]> {
+    return Array.from(this.academicNodeResources.values()).filter(
+      (l) => l.courseId === courseId && l.userId === requesterUserId,
+    );
+  }
+
+  async listNodeLinksForResource(
+    resourceId: string,
+    requesterUserId: string,
+  ): Promise<AcademicNodeResourceLink[]> {
+    return Array.from(this.academicNodeResources.values()).filter(
+      (l) => l.resourceId === resourceId && l.userId === requesterUserId,
+    );
+  }
+
+  async deleteResourceLink(id: string, requesterUserId: string): Promise<void> {
+    const link = this.academicNodeResources.get(id);
+    if (!link) return;
+    assertOwnership(link.userId, requesterUserId, 'AcademicNodeResourceLink');
+    this.academicNodeResources.delete(id);
+  }
+
+  async listAcademicNodesWithResources(
+    courseId: string,
+    requesterUserId: string,
+  ): Promise<AcademicNodeWithResources[]> {
+    const nodes = await this.listAcademicNodes(courseId, requesterUserId);
+    if (nodes.length === 0) return [];
+
+    const links = await this.listResourceLinksForCourse(courseId, requesterUserId);
+    const resources = await this.listResources(requesterUserId, courseId);
+    const resourceMap = new Map(resources.map((r) => [r.id, r]));
+
+    return nodes.map((node) => {
+      const nodeLinks = links.filter((l) => l.nodeId === node.id);
+      const linkedResources = nodeLinks.map((link) => {
+        const res = resourceMap.get(link.resourceId);
+        return {
+          linkId: link.id,
+          resourceId: link.resourceId,
+          resourceTitle: res?.title || 'Unknown Resource',
+          resourceType: res?.type || 'document',
+          pageStart: link.pageStart,
+          pageEnd: link.pageEnd,
+          origin: link.origin,
+        };
+      });
+
+      const studyStateKey = `${requesterUserId}_${node.id}`;
+      const state = this.topicStudyStates.get(studyStateKey) || null;
+
+      return {
+        ...node,
+        resources: linkedResources,
+        studyState: state,
+      };
+    });
+  }
+
+  // --- Study State & Events ---
+  async getTopicStudyState(
+    courseId: string,
+    topicId: string,
+    requesterUserId: string,
+  ): Promise<TopicStudyState> {
+    if (!isValidUuid(courseId) || !isValidUuid(topicId) || !isValidUuid(requesterUserId)) {
+      throw AppError.badRequest('Invalid UUID format.');
+    }
+    await this.getCourse(courseId, requesterUserId);
+
+    const node = this.academicNodes.get(topicId);
+    if (!node) {
+      throw AppError.notFound('Topic node not found.');
+    }
+    assertOwnership(node.userId, requesterUserId, 'AcademicNode');
+    if (node.courseId !== courseId) {
+      throw AppError.badRequest('Topic does not belong to the requested course.');
+    }
+
+    const key = `${requesterUserId}_${topicId}`;
+    const existing = this.topicStudyStates.get(key);
+    if (existing) {
+      return existing;
+    }
+
+    const now = new Date();
+    return {
+      id: crypto.randomUUID(),
+      userId: requesterUserId,
+      courseId,
+      topicId,
+      state: 'not_started',
+      lastStudiedAt: null,
+      lastReviewedAt: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+  }
+
+  async listCourseStudyStates(
+    courseId: string,
+    requesterUserId: string,
+  ): Promise<TopicStudyState[]> {
+    if (!isValidUuid(courseId) || !isValidUuid(requesterUserId)) {
+      throw AppError.badRequest('Invalid UUID format.');
+    }
+    await this.getCourse(courseId, requesterUserId);
+
+    const nodes = Array.from(this.academicNodes.values()).filter(
+      (n) => n.courseId === courseId && n.userId === requesterUserId && n.type === 'topic',
+    );
+
+    return nodes.map((node) => {
+      const key = `${requesterUserId}_${node.id}`;
+      const existing = this.topicStudyStates.get(key);
+      if (existing) return existing;
+      const now = new Date();
+      return {
+        id: crypto.randomUUID(),
+        userId: requesterUserId,
+        courseId,
+        topicId: node.id,
+        state: 'not_started',
+        lastStudiedAt: null,
+        lastReviewedAt: null,
+        createdAt: now,
+        updatedAt: now,
+      };
+    });
+  }
+
+  async setTopicStudyState(
+    courseId: string,
+    topicId: string,
+    requesterUserId: string,
+    state: StudyStateValue,
+    eventType?: StudyEventType,
+    metadata?: Record<string, unknown> | null,
+  ): Promise<{ studyState: TopicStudyState; event: StudyEvent }> {
+    if (!isValidUuid(courseId) || !isValidUuid(topicId) || !isValidUuid(requesterUserId)) {
+      throw AppError.badRequest('Invalid UUID format.');
+    }
+    await this.getCourse(courseId, requesterUserId);
+
+    const node = this.academicNodes.get(topicId);
+    if (!node) {
+      throw AppError.notFound('Topic node not found.');
+    }
+    assertOwnership(node.userId, requesterUserId, 'AcademicNode');
+    if (node.courseId !== courseId) {
+      throw AppError.badRequest('Topic does not belong to the requested course.');
+    }
+
+    const key = `${requesterUserId}_${topicId}`;
+    const existing = this.topicStudyStates.get(key);
+    const now = new Date();
+
+    let lastStudiedAt = existing?.lastStudiedAt ?? null;
+    let lastReviewedAt = existing?.lastReviewedAt ?? null;
+
+    if (state === 'learning') {
+      lastStudiedAt = now;
+    } else if (state === 'reviewed') {
+      lastReviewedAt = now;
+      lastStudiedAt = now;
+    }
+
+    const studyState: TopicStudyState = {
+      id: existing?.id || crypto.randomUUID(),
+      userId: requesterUserId,
+      courseId,
+      topicId,
+      state,
+      lastStudiedAt,
+      lastReviewedAt,
+      createdAt: existing?.createdAt || now,
+      updatedAt: now,
+    };
+    this.topicStudyStates.set(key, studyState);
+
+    const effectiveEventType: StudyEventType =
+      eventType ||
+      (state === 'reviewed'
+        ? 'reviewed'
+        : state === 'needs_review'
+          ? 'marked_needs_review'
+          : state === 'learning'
+            ? 'study_started'
+            : 'state_changed');
+
+    const event: StudyEvent = {
+      id: crypto.randomUUID(),
+      userId: requesterUserId,
+      courseId,
+      topicId,
+      type: effectiveEventType,
+      occurredAt: now,
+      metadata: metadata || null,
+      createdAt: now,
+    };
+    this.studyEvents.set(event.id, event);
+
+    return { studyState, event };
+  }
+
+  async recordStudyEvent(
+    courseId: string,
+    topicId: string,
+    requesterUserId: string,
+    type: StudyEventType,
+    metadata?: Record<string, unknown> | null,
+  ): Promise<{ studyState: TopicStudyState; event: StudyEvent }> {
+    let targetState: StudyStateValue = 'learning';
+    if (type === 'reviewed') {
+      targetState = 'reviewed';
+    } else if (type === 'marked_needs_review') {
+      targetState = 'needs_review';
+    } else if (type === 'study_completed') {
+      targetState = 'learning';
+    }
+
+    return this.setTopicStudyState(courseId, topicId, requesterUserId, targetState, type, metadata);
+  }
+
+  async listStudyEvents(
+    courseId: string,
+    topicId: string,
+    requesterUserId: string,
+  ): Promise<StudyEvent[]> {
+    if (!isValidUuid(courseId) || !isValidUuid(topicId) || !isValidUuid(requesterUserId)) {
+      throw AppError.badRequest('Invalid UUID format.');
+    }
+    await this.getCourse(courseId, requesterUserId);
+
+    const node = this.academicNodes.get(topicId);
+    if (!node) {
+      throw AppError.notFound('Topic node not found.');
+    }
+    assertOwnership(node.userId, requesterUserId, 'AcademicNode');
+    if (node.courseId !== courseId) {
+      throw AppError.badRequest('Topic does not belong to the requested course.');
+    }
+
+    return Array.from(this.studyEvents.values())
+      .filter((e) => e.topicId === topicId && e.userId === requesterUserId)
+      .reverse()
+      .sort((a, b) => b.occurredAt.getTime() - a.occurredAt.getTime());
   }
 
   async deleteUser(id: string): Promise<void> {

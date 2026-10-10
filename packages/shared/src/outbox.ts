@@ -6,10 +6,11 @@ const logger = createLogger({ module: 'outbox' });
 
 export interface EnqueueJobOptions {
   queueName: JobQueueName;
-  payload: Record<string, unknown>;
-  idempotencyKey: string;
+  payload?: Record<string, unknown>;
+  idempotencyKey?: string;
   maxAttempts?: number;
   scheduledAt?: Date;
+  simulateFailure?: boolean;
 }
 
 export interface OutboxStore {
@@ -26,6 +27,7 @@ export interface OutboxStore {
   ): Promise<JobOutboxRecord>;
   listPending(limit?: number): Promise<JobOutboxRecord[]>;
   listStaleRunning(staleBefore: Date): Promise<JobOutboxRecord[]>;
+  deleteJob?(id: string): Promise<void>;
 }
 
 export class InMemoryOutboxStore implements OutboxStore {
@@ -106,6 +108,10 @@ export class InMemoryOutboxStore implements OutboxStore {
     );
   }
 
+  async deleteJob(id: string): Promise<void> {
+    this.jobs.delete(id);
+  }
+
   clear(): void {
     this.jobs.clear();
   }
@@ -120,34 +126,40 @@ export class TransactionalOutboxManager {
     ) => Promise<void>,
   ) {}
 
+  getStore(): OutboxStore {
+    return this.store;
+  }
+
   /**
    * Enqueues a job record into the durable PostgreSQL outbox table.
    * Must be called within the same database transaction as the domain operation.
    */
   async enqueue(options: EnqueueJobOptions): Promise<JobOutboxRecord> {
-    const existing = await this.store.getJobByIdempotencyKey(
-      options.queueName,
-      options.idempotencyKey,
-    );
+    const idempotencyKey = options.idempotencyKey || crypto.randomUUID();
+    const existing = await this.store.getJobByIdempotencyKey(options.queueName, idempotencyKey);
     if (existing) {
       // Idempotent return: do not insert duplicate
       logger.info('Idempotent job enqueue request deduplicated', {
         jobId: existing.id,
         queue: options.queueName,
-        idempotencyKey: options.idempotencyKey,
+        idempotencyKey,
       });
       return existing;
     }
 
     const job = await this.store.createJob({
       queueName: options.queueName,
-      payload: options.payload,
-      idempotencyKey: options.idempotencyKey,
+      payload: options.payload || {},
+      idempotencyKey,
       status: 'pending',
       attempts: 0,
       maxAttempts: options.maxAttempts ?? 3,
       scheduledAt: options.scheduledAt ?? new Date(),
     });
+
+    if (options.simulateFailure) {
+      throw new Error('SIMULATED_TRANSACTION_FAILURE');
+    }
 
     logger.info('Durable job recorded in outbox', {
       jobId: job.id,
@@ -166,11 +178,19 @@ export class TransactionalOutboxManager {
     let count = 0;
 
     for (const job of pendingJobs) {
-      if (this.transportDispatcher) {
-        await this.transportDispatcher(job.queueName, job);
+      try {
+        if (this.transportDispatcher) {
+          await this.transportDispatcher(job.queueName, job);
+        }
+        await this.store.updateJobStatus(job.id, 'dispatched');
+        count++;
+      } catch (err) {
+        logger.warn(`Failed to dispatch job ${job.id} to transport: ${(err as Error).message}`, {
+          jobId: job.id,
+          queue: job.queueName,
+          error: (err as Error).message,
+        });
       }
-      await this.store.updateJobStatus(job.id, 'dispatched');
-      count++;
     }
 
     return count;

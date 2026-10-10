@@ -3,6 +3,7 @@ import type {
   Resource,
   ResourceChunk,
   AcademicNode,
+  AcademicNodeResourceLink,
 } from '@campusflow/types';
 import {
   createLogger,
@@ -10,6 +11,7 @@ import {
   extractDocumentText,
   chunkExtractedPages,
   inferAcademicMapNodes,
+  findTopicPageProvenance,
   type ObjectStorage,
 } from '@campusflow/shared';
 
@@ -30,6 +32,13 @@ export interface ResourceProcessorStore {
   createAcademicNodes(
     nodes: Array<Omit<AcademicNode, 'id' | 'createdAt' | 'updatedAt'>>,
   ): Promise<AcademicNode[]>;
+  linkResourceToAcademicNode?(
+    link: Omit<AcademicNodeResourceLink, 'id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<AcademicNodeResourceLink>;
+  listResourceLinksForCourse?(
+    courseId: string,
+    userId: string,
+  ): Promise<AcademicNodeResourceLink[]>;
 }
 
 export interface ResourceJobPayload {
@@ -179,29 +188,93 @@ export async function processResourceJob(
         const existingNodes = await store.listAcademicNodes(courseId, userId);
         if (existingNodes.length === 0) {
           const inferredNodes = inferAcademicMapNodes(extraction.text);
-          const nodesToCreate: Array<Omit<AcademicNode, 'id' | 'createdAt' | 'updatedAt'>> = [];
 
           for (const mod of inferredNodes) {
-            nodesToCreate.push({
-              courseId,
-              userId,
-              parentId: null,
-              type: mod.type,
-              title: mod.title,
-              description: null,
-              orderIndex: mod.orderIndex,
-              origin: mod.origin,
-              confidence: mod.confidence,
-              needsReview: mod.needsReview,
-            });
-          }
+            const [createdModule] = await store.createAcademicNodes([
+              {
+                courseId,
+                userId,
+                parentId: null,
+                type: mod.type,
+                title: mod.title,
+                description: null,
+                orderIndex: mod.orderIndex,
+                origin: mod.origin,
+                confidence: mod.confidence,
+                needsReview: mod.needsReview,
+              },
+            ]);
 
-          if (nodesToCreate.length > 0) {
-            await store.createAcademicNodes(nodesToCreate);
+            if (createdModule && mod.children && mod.children.length > 0) {
+              for (const topic of mod.children) {
+                const [createdTopic] = await store.createAcademicNodes([
+                  {
+                    courseId,
+                    userId,
+                    parentId: createdModule.id,
+                    type: topic.type,
+                    title: topic.title,
+                    description: null,
+                    orderIndex: topic.orderIndex,
+                    origin: topic.origin,
+                    confidence: topic.confidence,
+                    needsReview: topic.needsReview,
+                  },
+                ]);
+
+                if (createdTopic && store.linkResourceToAcademicNode) {
+                  const prov = findTopicPageProvenance(extraction.pages, topic.title);
+                  await store.linkResourceToAcademicNode({
+                    nodeId: createdTopic.id,
+                    resourceId,
+                    userId,
+                    courseId,
+                    pageStart: prov.pageStart,
+                    pageEnd: prov.pageEnd,
+                    origin: 'model',
+                  });
+                }
+              }
+            } else if (createdModule && store.linkResourceToAcademicNode) {
+              const prov = findTopicPageProvenance(extraction.pages, mod.title);
+              await store.linkResourceToAcademicNode({
+                nodeId: createdModule.id,
+                resourceId,
+                userId,
+                courseId,
+                pageStart: prov.pageStart,
+                pageEnd: prov.pageEnd,
+                origin: 'model',
+              });
+            }
+          }
+        } else if (store.linkResourceToAcademicNode) {
+          // Existing course map: match and link current resource to relevant topics
+          const existingLinks = store.listResourceLinksForCourse
+            ? await store.listResourceLinksForCourse(courseId, userId)
+            : [];
+          const alreadyLinkedNodeIds = new Set(
+            existingLinks.filter((l) => l.resourceId === resourceId).map((l) => l.nodeId),
+          );
+
+          for (const node of existingNodes) {
+            if (alreadyLinkedNodeIds.has(node.id)) continue;
+            const prov = findTopicPageProvenance(extraction.pages, node.title);
+            if (prov.pageStart !== null) {
+              await store.linkResourceToAcademicNode({
+                nodeId: node.id,
+                resourceId,
+                userId,
+                courseId,
+                pageStart: prov.pageStart,
+                pageEnd: prov.pageEnd,
+                origin: 'model',
+              });
+            }
           }
         }
       } catch (err) {
-        logger.warn('Failed to deduce academic nodes; continuing ingestion', {
+        logger.warn('Failed to deduce academic nodes or link resources; continuing ingestion', {
           resourceId,
           error: (err as Error).message,
         });
