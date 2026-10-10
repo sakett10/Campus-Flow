@@ -209,6 +209,44 @@ export interface AcademicNodeWithResources extends AcademicNode {
   studyState?: TopicStudyState | null | undefined;
 }
 
+export interface TodayAssessmentItem extends AssessmentWithTopics {
+  timeframe: 'today' | 'upcoming' | 'overdue' | 'unscheduled' | 'completed';
+  courseCode?: string | undefined;
+  courseTitle?: string | undefined;
+}
+
+export interface TodayTopicItem {
+  courseId: string;
+  courseCode: string;
+  courseTitle: string;
+  topicId: string;
+  topicTitle: string;
+  moduleTitle?: string | null | undefined;
+  state: StudyStateValue;
+  lastStudiedAt: Date | null;
+  lastReviewedAt: Date | null;
+}
+
+export interface TodayOverviewResponse {
+  courses: Course[];
+  assessments: {
+    dueToday: TodayAssessmentItem[];
+    overdue: TodayAssessmentItem[];
+    upcoming: TodayAssessmentItem[];
+    unscheduled: TodayAssessmentItem[];
+    completed: TodayAssessmentItem[];
+  };
+  continueStudying: TodayTopicItem[];
+  needsReview: TodayTopicItem[];
+  summary: {
+    totalCourses: number;
+    upcomingAssessmentCount: number;
+    overdueAssessmentCount: number;
+    activeTopicsCount: number;
+    needsReviewCount: number;
+  };
+}
+
 export interface SearchResultItem {
   resourceId: string;
   resourceTitle: string;

@@ -46,6 +46,9 @@ import {
   StudyEvent,
   StudyStateValue,
   StudyEventType,
+  TodayOverviewResponse,
+  TodayAssessmentItem,
+  TodayTopicItem,
 } from '@campusflow/types';
 import {
   AppError,
@@ -55,6 +58,9 @@ import {
   type EnqueueJobOptions,
   type OutboxStore,
   InMemoryOutboxStore,
+  getDayBoundariesInTimezone,
+  isValidIanaTimezone,
+  sortAssessmentsChronologically,
 } from '@campusflow/shared';
 
 /**
@@ -232,6 +238,7 @@ export interface DataStore {
     topicId: string,
     requesterUserId: string,
   ): Promise<StudyEvent[]>;
+  getTodayOverview(userId: string, timezone?: string, now?: Date): Promise<TodayOverviewResponse>;
 
   deleteUser(id: string): Promise<void>;
 
@@ -1687,6 +1694,152 @@ export class InMemoryDataStore implements DataStore {
       .filter((e) => e.topicId === topicId && e.userId === requesterUserId)
       .reverse()
       .sort((a, b) => b.occurredAt.getTime() - a.occurredAt.getTime());
+  }
+
+  async getTodayOverview(
+    userId: string,
+    timezone?: string,
+    now: Date = new Date(),
+  ): Promise<TodayOverviewResponse> {
+    if (!isValidUuid(userId)) {
+      throw AppError.badRequest('Invalid user ID format.');
+    }
+
+    const tz = timezone || 'UTC';
+    if (!isValidIanaTimezone(tz)) {
+      throw AppError.badRequest(`Invalid IANA timezone specified: '${tz}'.`);
+    }
+
+    const courses = await this.listCourses(userId);
+    const courseMap = new Map(courses.map((c) => [c.id, c]));
+
+    const rawAssessments = await this.listAssessments(userId);
+    const { startOfToday, startOfNextDay } = getDayBoundariesInTimezone(now, tz);
+
+    const dueToday: TodayAssessmentItem[] = [];
+    const overdue: TodayAssessmentItem[] = [];
+    const upcoming: TodayAssessmentItem[] = [];
+    const unscheduled: TodayAssessmentItem[] = [];
+    const completed: TodayAssessmentItem[] = [];
+
+    for (const a of rawAssessments) {
+      const course = courseMap.get(a.courseId);
+      const enriched: TodayAssessmentItem = {
+        ...a,
+        courseCode: course?.code,
+        courseTitle: course?.title,
+        timeframe: 'upcoming',
+      };
+
+      if (a.status === 'completed') {
+        enriched.timeframe = 'completed';
+        completed.push(enriched);
+        continue;
+      }
+
+      if (a.status === 'cancelled') {
+        continue;
+      }
+
+      if (!a.date) {
+        enriched.timeframe = 'unscheduled';
+        unscheduled.push(enriched);
+        continue;
+      }
+
+      const aDate = new Date(a.date);
+      if (aDate < startOfToday) {
+        enriched.timeframe = 'overdue';
+        overdue.push(enriched);
+      } else if (aDate < startOfNextDay) {
+        enriched.timeframe = 'today';
+        dueToday.push(enriched);
+      } else {
+        enriched.timeframe = 'upcoming';
+        upcoming.push(enriched);
+      }
+    }
+
+    // Sort chronologically ascending with stable secondary sort key
+    sortAssessmentsChronologically(overdue);
+    sortAssessmentsChronologically(dueToday);
+    sortAssessmentsChronologically(upcoming);
+    sortAssessmentsChronologically(completed);
+
+    // Active Study Topics
+    const allLearning: TodayTopicItem[] = [];
+    const allNeedsReview: TodayTopicItem[] = [];
+
+    for (const state of this.topicStudyStates.values()) {
+      if (state.userId !== userId) continue;
+      const course = courseMap.get(state.courseId);
+      if (!course) continue;
+
+      const node = this.academicNodes.get(state.topicId);
+      if (!node || node.userId !== userId || node.courseId !== state.courseId) continue;
+
+      let moduleTitle: string | null = null;
+      if (node.parentId) {
+        const parent = this.academicNodes.get(node.parentId);
+        if (parent && parent.userId === userId) {
+          moduleTitle = parent.title;
+        }
+      }
+
+      const item: TodayTopicItem = {
+        courseId: course.id,
+        courseCode: course.code,
+        courseTitle: course.title,
+        topicId: node.id,
+        topicTitle: node.title,
+        moduleTitle,
+        state: state.state,
+        lastStudiedAt: state.lastStudiedAt,
+        lastReviewedAt: state.lastReviewedAt,
+      };
+
+      if (state.state === 'learning') {
+        allLearning.push(item);
+      } else if (state.state === 'needs_review') {
+        allNeedsReview.push(item);
+      }
+    }
+
+    allLearning.sort((a, b) => {
+      const timeA = a.lastStudiedAt ? new Date(a.lastStudiedAt).getTime() : 0;
+      const timeB = b.lastStudiedAt ? new Date(b.lastStudiedAt).getTime() : 0;
+      const diff = timeB - timeA;
+      if (diff !== 0) return diff;
+      return a.topicId.localeCompare(b.topicId);
+    });
+
+    allNeedsReview.sort((a, b) => {
+      const timeA = a.lastReviewedAt ? new Date(a.lastReviewedAt).getTime() : 0;
+      const timeB = b.lastReviewedAt ? new Date(b.lastReviewedAt).getTime() : 0;
+      const diff = timeB - timeA;
+      if (diff !== 0) return diff;
+      return a.topicId.localeCompare(b.topicId);
+    });
+
+    return {
+      courses,
+      assessments: {
+        dueToday,
+        overdue,
+        upcoming,
+        unscheduled,
+        completed,
+      },
+      continueStudying: allLearning.slice(0, 5),
+      needsReview: allNeedsReview.slice(0, 5),
+      summary: {
+        totalCourses: courses.length,
+        upcomingAssessmentCount: dueToday.length + upcoming.length,
+        overdueAssessmentCount: overdue.length,
+        activeTopicsCount: allLearning.length,
+        needsReviewCount: allNeedsReview.length,
+      },
+    };
   }
 
   async deleteUser(id: string): Promise<void> {

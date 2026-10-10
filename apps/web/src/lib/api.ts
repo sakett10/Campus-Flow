@@ -34,6 +34,7 @@ import type {
   StudyEvent,
   StudyStateValue,
   StudyEventType,
+  TodayOverviewResponse,
 } from '@campusflow/types';
 
 const API_BASE = process.env['NEXT_PUBLIC_API_URL'] || 'http://localhost:3001/api/v1';
@@ -945,4 +946,21 @@ export async function recordTopicStudyEvent(
     throw new Error(err.detail || 'Failed to record study event');
   }
   return await res.json();
+}
+
+export async function fetchTodayOverview(timezone?: string): Promise<TodayOverviewResponse | null> {
+  try {
+    const tz =
+      timezone ||
+      (typeof Intl !== 'undefined' ? Intl.DateTimeFormat().resolvedOptions().timeZone : 'UTC');
+    const url = `${API_BASE}/today${tz ? `?timezone=${encodeURIComponent(tz)}` : ''}`;
+    const res = await fetch(url, {
+      headers: getHeaders(),
+      cache: 'no-store',
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
 }

@@ -1,4 +1,4 @@
-import { eq, and, desc, asc, ilike, lte, sql } from 'drizzle-orm';
+import { eq, and, desc, asc, ilike, lte, sql, inArray } from 'drizzle-orm';
 import postgres from 'postgres';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import * as schema from './schema.js';
@@ -44,7 +44,144 @@ import type {
   StudyEvent,
   StudyStateValue,
   StudyEventType,
+  TodayOverviewResponse,
+  TodayAssessmentItem,
+  TodayTopicItem,
 } from '@campusflow/types';
+
+function isValidIanaTimezone(timeZone: string): boolean {
+  if (!timeZone || typeof timeZone !== 'string') return false;
+  try {
+    Intl.DateTimeFormat(undefined, { timeZone });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+interface ZonedDateParts {
+  year: number;
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+  second: number;
+}
+
+function getZonedParts(date: Date, timeZone: string): ZonedDateParts {
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hourCycle: 'h23',
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: 'numeric',
+    second: 'numeric',
+  });
+  const parts = fmt.formatToParts(date);
+  const get = (t: string) => parseInt(parts.find((p) => p.type === t)?.value || '0', 10);
+  return {
+    year: get('year'),
+    month: get('month'),
+    day: get('day'),
+    hour: get('hour') % 24,
+    minute: get('minute'),
+    second: get('second'),
+  };
+}
+
+function getStartOfLocalDay(year: number, month: number, day: number, timeZone: string): Date {
+  const targetUtcTime = Date.UTC(year, month - 1, day, 0, 0, 0, 0);
+  let guess = targetUtcTime;
+  const seen = new Set<number>();
+  let candidate: number | null = null;
+
+  for (let i = 0; i < 8; i++) {
+    if (seen.has(guess)) {
+      break;
+    }
+    seen.add(guess);
+
+    const parts = getZonedParts(new Date(guess), timeZone);
+    const guessLocalTime = Date.UTC(
+      parts.year,
+      parts.month - 1,
+      parts.day,
+      parts.hour,
+      parts.minute,
+      parts.second,
+      0,
+    );
+    const diff = guessLocalTime - targetUtcTime;
+
+    if (parts.year === year && parts.month === month && parts.day === day) {
+      if (candidate === null || guess < candidate) {
+        candidate = guess;
+      }
+    }
+
+    if (diff === 0) {
+      const earlier = guess - 3600000;
+      const earlierParts = getZonedParts(new Date(earlier), timeZone);
+      if (
+        earlierParts.year === year &&
+        earlierParts.month === month &&
+        earlierParts.day === day &&
+        earlierParts.hour === 0 &&
+        earlierParts.minute === 0
+      ) {
+        return new Date(earlier);
+      }
+      return new Date(guess);
+    }
+
+    guess -= diff;
+  }
+
+  if (candidate !== null) {
+    return new Date(candidate);
+  }
+  return new Date(guess);
+}
+
+function getDayBoundariesInTimezone(
+  now: Date = new Date(),
+  timeZone: string = 'UTC',
+): { startOfToday: Date; startOfNextDay: Date; endOfToday: Date } {
+  if (!isValidIanaTimezone(timeZone)) {
+    throw new Error(`Invalid IANA timezone specified: '${timeZone}'.`);
+  }
+
+  const parts = getZonedParts(now, timeZone);
+  const year = parts.year;
+  const month = parts.month;
+  const day = parts.day;
+
+  const startOfToday = getStartOfLocalDay(year, month, day, timeZone);
+
+  const nextDateUtc = new Date(Date.UTC(year, month - 1, day + 1, 12, 0, 0));
+  const nextYear = nextDateUtc.getUTCFullYear();
+  const nextMonth = nextDateUtc.getUTCMonth() + 1;
+  const nextDay = nextDateUtc.getUTCDate();
+
+  const startOfNextDay = getStartOfLocalDay(nextYear, nextMonth, nextDay, timeZone);
+  const endOfToday = new Date(startOfNextDay.getTime() - 1);
+
+  return { startOfToday, startOfNextDay, endOfToday };
+}
+
+function sortAssessmentsChronologically<T extends { date?: Date | string | null; id: string }>(
+  items: T[],
+): T[] {
+  return items.sort((a, b) => {
+    const timeA = a.date ? new Date(a.date).getTime() : 0;
+    const timeB = b.date ? new Date(b.date).getTime() : 0;
+    const diff = timeA - timeB;
+    if (diff !== 0) return diff;
+    return a.id.localeCompare(b.id);
+  });
+}
 
 export class PostgresDataStore {
   private readonly db: ReturnType<typeof drizzle<typeof schema>>;
@@ -1500,6 +1637,184 @@ export class PostgresDataStore {
       .orderBy(desc(schema.studyEvents.occurredAt), desc(schema.studyEvents.createdAt));
 
     return rows.map((r) => this.mapStudyEventRow(r));
+  }
+
+  async getTodayOverview(
+    userId: string,
+    timezone?: string,
+    now: Date = new Date(),
+  ): Promise<TodayOverviewResponse> {
+    const tz = timezone || 'UTC';
+    if (!isValidIanaTimezone(tz)) {
+      throw new Error(`Invalid IANA timezone specified: '${tz}'.`);
+    }
+
+    const courses = await this.listCourses(userId);
+    const courseMap = new Map(courses.map((c) => [c.id, c]));
+
+    const rawAssessments = await this.listAssessments(userId);
+    const { startOfToday, startOfNextDay } = getDayBoundariesInTimezone(now, tz);
+
+    const dueToday: TodayAssessmentItem[] = [];
+    const overdue: TodayAssessmentItem[] = [];
+    const upcoming: TodayAssessmentItem[] = [];
+    const unscheduled: TodayAssessmentItem[] = [];
+    const completed: TodayAssessmentItem[] = [];
+
+    for (const a of rawAssessments) {
+      const course = courseMap.get(a.courseId);
+      const enriched: TodayAssessmentItem = {
+        ...a,
+        courseCode: course?.code,
+        courseTitle: course?.title,
+        timeframe: 'upcoming',
+      };
+
+      if (a.status === 'completed') {
+        enriched.timeframe = 'completed';
+        completed.push(enriched);
+        continue;
+      }
+
+      if (a.status === 'cancelled') {
+        continue;
+      }
+
+      if (!a.date) {
+        enriched.timeframe = 'unscheduled';
+        unscheduled.push(enriched);
+        continue;
+      }
+
+      const aDate = new Date(a.date);
+      if (aDate < startOfToday) {
+        enriched.timeframe = 'overdue';
+        overdue.push(enriched);
+      } else if (aDate < startOfNextDay) {
+        enriched.timeframe = 'today';
+        dueToday.push(enriched);
+      } else {
+        enriched.timeframe = 'upcoming';
+        upcoming.push(enriched);
+      }
+    }
+
+    // Sort chronologically ascending with stable secondary sort key
+    sortAssessmentsChronologically(overdue);
+    sortAssessmentsChronologically(dueToday);
+    sortAssessmentsChronologically(upcoming);
+    sortAssessmentsChronologically(completed);
+
+    // Query active study states
+    const activeStates = await this.db
+      .select({
+        state: schema.topicStudyStates.state,
+        lastStudiedAt: schema.topicStudyStates.lastStudiedAt,
+        lastReviewedAt: schema.topicStudyStates.lastReviewedAt,
+        courseId: schema.courses.id,
+        courseCode: schema.courses.code,
+        courseTitle: schema.courses.title,
+        topicId: schema.academicNodes.id,
+        topicTitle: schema.academicNodes.title,
+        parentId: schema.academicNodes.parentId,
+      })
+      .from(schema.topicStudyStates)
+      .innerJoin(
+        schema.academicNodes,
+        and(
+          eq(schema.academicNodes.id, schema.topicStudyStates.topicId),
+          eq(schema.academicNodes.userId, userId),
+        ),
+      )
+      .innerJoin(
+        schema.courses,
+        and(
+          eq(schema.courses.id, schema.topicStudyStates.courseId),
+          eq(schema.courses.userId, userId),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.topicStudyStates.userId, userId),
+          sql`${schema.topicStudyStates.state} IN ('learning', 'needs_review')`,
+        ),
+      );
+
+    const parentIds = Array.from(
+      new Set(activeStates.map((s) => s.parentId).filter((p): p is string => Boolean(p))),
+    );
+    const parentMap = new Map<string, string>();
+    if (parentIds.length > 0) {
+      const parentNodes = await this.db
+        .select({ id: schema.academicNodes.id, title: schema.academicNodes.title })
+        .from(schema.academicNodes)
+        .where(
+          and(eq(schema.academicNodes.userId, userId), inArray(schema.academicNodes.id, parentIds)),
+        );
+      for (const p of parentNodes) {
+        parentMap.set(p.id, p.title);
+      }
+    }
+
+    const allLearning: TodayTopicItem[] = [];
+    const allNeedsReview: TodayTopicItem[] = [];
+
+    for (const s of activeStates) {
+      const moduleTitle = s.parentId ? (parentMap.get(s.parentId) ?? null) : null;
+      const item: TodayTopicItem = {
+        courseId: s.courseId,
+        courseCode: s.courseCode,
+        courseTitle: s.courseTitle,
+        topicId: s.topicId,
+        topicTitle: s.topicTitle,
+        moduleTitle,
+        state: s.state as StudyStateValue,
+        lastStudiedAt: s.lastStudiedAt,
+        lastReviewedAt: s.lastReviewedAt,
+      };
+
+      if (s.state === 'learning') {
+        allLearning.push(item);
+      } else if (s.state === 'needs_review') {
+        allNeedsReview.push(item);
+      }
+    }
+
+    allLearning.sort((a, b) => {
+      const timeA = a.lastStudiedAt ? new Date(a.lastStudiedAt).getTime() : 0;
+      const timeB = b.lastStudiedAt ? new Date(b.lastStudiedAt).getTime() : 0;
+      const diff = timeB - timeA;
+      if (diff !== 0) return diff;
+      return a.topicId.localeCompare(b.topicId);
+    });
+
+    allNeedsReview.sort((a, b) => {
+      const timeA = a.lastReviewedAt ? new Date(a.lastReviewedAt).getTime() : 0;
+      const timeB = b.lastReviewedAt ? new Date(b.lastReviewedAt).getTime() : 0;
+      const diff = timeB - timeA;
+      if (diff !== 0) return diff;
+      return a.topicId.localeCompare(b.topicId);
+    });
+
+    return {
+      courses,
+      assessments: {
+        dueToday,
+        overdue,
+        upcoming,
+        unscheduled,
+        completed,
+      },
+      continueStudying: allLearning.slice(0, 5),
+      needsReview: allNeedsReview.slice(0, 5),
+      summary: {
+        totalCourses: courses.length,
+        upcomingAssessmentCount: dueToday.length + upcoming.length,
+        overdueAssessmentCount: overdue.length,
+        activeTopicsCount: allLearning.length,
+        needsReviewCount: allNeedsReview.length,
+      },
+    };
   }
 
   // --- Role Families ---

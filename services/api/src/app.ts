@@ -20,6 +20,7 @@ import { healthRouter } from './modules/health/index.js';
 import { opportunitiesRouter } from './modules/opportunities/index.js';
 import { careerRouter } from './modules/career/index.js';
 import { applicationsRouter } from './modules/applications/index.js';
+import { todayRouter } from './modules/today/index.js';
 
 export function createApiApp() {
   const app = new Hono();
@@ -50,6 +51,7 @@ export function createApiApp() {
   api.route('/opportunities', opportunitiesRouter);
   api.route('/career', careerRouter);
   api.route('/applications', applicationsRouter);
+  api.route('/today', todayRouter);
 
   app.route('/api/v1', api);
 
