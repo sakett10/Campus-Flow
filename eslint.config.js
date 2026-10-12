@@ -8,6 +8,7 @@ export default defineConfig(
       'node_modules/**',
       '**/dist/**',
       '**/.next/**',
+      '**/.next-dev/**',
       '**/coverage/**',
       'packages/database/drizzle/**',
       'services/ml/**',
