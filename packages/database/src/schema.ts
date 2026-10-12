@@ -303,6 +303,10 @@ export const academicNodes = pgTable(
     origin: varchar('origin', { length: 50 }).notNull().default('model'), // model, user
     confidence: numeric('confidence', { precision: 4, scale: 3 }).default('0.800'),
     needsReview: varchar('needs_review', { length: 20 }).notNull().default('no'), // yes, no
+    estimatedMinutes: integer('estimated_minutes'),
+    learningObjectives: jsonb('learning_objectives').$type<string[]>(),
+    prerequisites: jsonb('prerequisites').$type<string[]>(),
+    notes: text('notes'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -427,6 +431,126 @@ export const studyEvents = pgTable(
 
 export type StudyEventRow = typeof studyEvents.$inferSelect;
 export type NewStudyEventRow = typeof studyEvents.$inferInsert;
+
+/**
+ * Table: study_plans
+ *
+ * Owner: `user_id` (foreign key -> users.id)
+ * Associated Course: `course_id` (optional foreign key -> courses.id)
+ * Purpose: Personalized academic schedule and time-allocation plan.
+ */
+export const studyPlans = pgTable(
+  'study_plans',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    courseId: uuid('course_id').references(() => courses.id, { onDelete: 'cascade' }),
+    title: varchar('title', { length: 255 }).notNull(),
+    targetExamDate: timestamp('target_exam_date', { withTimezone: true }),
+    availableHoursPerWeek: numeric('available_hours_per_week', { precision: 4, scale: 1 }).default(
+      '10.0',
+    ),
+    dailyTargetMinutes: integer('daily_target_minutes').default(60),
+    status: varchar('status', { length: 50 }).notNull().default('active'), // active, completed, archived
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index('study_plans_user_id_idx').on(table.userId),
+    index('study_plans_course_id_idx').on(table.courseId),
+  ],
+);
+
+export type StudyPlanRow = typeof studyPlans.$inferSelect;
+export type NewStudyPlanRow = typeof studyPlans.$inferInsert;
+
+/**
+ * Table: study_sessions
+ *
+ * Owner: `user_id` (foreign key -> users.id)
+ * Associated Plan: `plan_id` (foreign key -> study_plans.id)
+ * Associated Topic: `topic_id` (foreign key -> academic_nodes.id)
+ * Associated Course: `course_id` (foreign key -> courses.id)
+ */
+export const studySessions = pgTable(
+  'study_sessions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    planId: uuid('plan_id')
+      .notNull()
+      .references(() => studyPlans.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    courseId: uuid('course_id')
+      .notNull()
+      .references(() => courses.id, { onDelete: 'cascade' }),
+    topicId: uuid('topic_id')
+      .notNull()
+      .references(() => academicNodes.id, { onDelete: 'cascade' }),
+    title: varchar('title', { length: 255 }).notNull(),
+    scheduledDate: timestamp('scheduled_date', { withTimezone: true }).notNull(),
+    durationMinutes: integer('duration_minutes').notNull().default(45),
+    sessionType: varchar('session_type', { length: 50 }).notNull().default('study'), // study, review, practice
+    status: varchar('status', { length: 50 }).notNull().default('scheduled'), // scheduled, completed, missed, rescheduled
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+    notes: text('notes'),
+    orderIndex: integer('order_index').notNull().default(0),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index('study_sessions_plan_id_idx').on(table.planId),
+    index('study_sessions_user_date_idx').on(table.userId, table.scheduledDate),
+    index('study_sessions_topic_id_idx').on(table.topicId),
+    index('study_sessions_course_id_idx').on(table.courseId),
+  ],
+);
+
+export type StudySessionRow = typeof studySessions.$inferSelect;
+export type NewStudySessionRow = typeof studySessions.$inferInsert;
+
+/**
+ * Table: topic_resources
+ *
+ * Dedicated curated & discovered resources mapped to topics.
+ * Distinguishes: syllabus_extracted, verified_external, recommended_unverified, student_uploaded.
+ */
+export const topicResources = pgTable(
+  'topic_resources',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    topicId: uuid('topic_id')
+      .notNull()
+      .references(() => academicNodes.id, { onDelete: 'cascade' }),
+    courseId: uuid('course_id')
+      .notNull()
+      .references(() => courses.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    title: varchar('title', { length: 255 }).notNull(),
+    provider: varchar('provider', { length: 100 }), // OpenStax, MIT OCW, Syllabus, etc.
+    url: text('url'),
+    type: varchar('type', { length: 50 }).notNull().default('textbook'), // textbook, lecture, article, video, practice
+    verificationStatus: varchar('verification_status', { length: 50 })
+      .notNull()
+      .default('recommended_unverified'),
+    relevanceNote: text('relevance_note'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index('topic_resources_topic_id_idx').on(table.topicId),
+    index('topic_resources_course_id_idx').on(table.courseId),
+    index('topic_resources_user_id_idx').on(table.userId),
+  ],
+);
+
+export type TopicResourceRow = typeof topicResources.$inferSelect;
+export type NewTopicResourceRow = typeof topicResources.$inferInsert;
 
 /**
  * Table: job_outbox
@@ -1098,3 +1222,208 @@ export const modelCards = pgTable(
 
 export type ModelCardRow = typeof modelCards.$inferSelect;
 export type NewModelCardRow = typeof modelCards.$inferInsert;
+
+/**
+ * =====================================================================
+ * PHASE 2: EXAMINATION INTELLIGENCE & PRACTICE ASSESSMENT TABLES
+ * =====================================================================
+ */
+
+/**
+ * Table: examination_papers
+ *
+ * Past examination question papers or official university test blueprints.
+ */
+export const examinationPapers = pgTable(
+  'examination_papers',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    courseId: uuid('course_id')
+      .notNull()
+      .references(() => courses.id, { onDelete: 'cascade' }),
+    resourceId: uuid('resource_id').references(() => resources.id, { onDelete: 'set null' }),
+    title: varchar('title', { length: 255 }).notNull(),
+    term: varchar('term', { length: 50 }),
+    examType: varchar('exam_type', { length: 50 }), // CAT-1, CAT-2, FAT, Midterm, Final, Quiz
+    academicYear: varchar('academic_year', { length: 50 }),
+    totalMarks: numeric('total_marks', { precision: 6, scale: 2 }),
+    durationMinutes: integer('duration_minutes'),
+    instructions: text('instructions'),
+    status: varchar('status', { length: 50 }).notNull().default('pending'), // pending, processing, ready, failed
+    metadata: jsonb('metadata'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index('examination_papers_user_id_idx').on(table.userId),
+    index('examination_papers_course_id_idx').on(table.courseId),
+    index('examination_papers_user_course_idx').on(table.userId, table.courseId),
+  ],
+);
+
+export type ExaminationPaperRow = typeof examinationPapers.$inferSelect;
+export type NewExaminationPaperRow = typeof examinationPapers.$inferInsert;
+
+/**
+ * Table: examination_questions
+ *
+ * Extracted, verified, and mapped questions from past papers.
+ */
+export const examinationQuestions = pgTable(
+  'examination_questions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    paperId: uuid('paper_id')
+      .notNull()
+      .references(() => examinationPapers.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    courseId: uuid('course_id')
+      .notNull()
+      .references(() => courses.id, { onDelete: 'cascade' }),
+    questionNumber: varchar('question_number', { length: 50 }).notNull(),
+    parentQuestionId: uuid('parent_question_id'),
+    questionText: text('question_text').notNull(),
+    marks: numeric('marks', { precision: 5, scale: 2 }),
+    pageNumber: integer('page_number'),
+    questionFormat: varchar('question_format', { length: 50 }).notNull().default('short_answer'),
+    options: jsonb('options'),
+    compulsory: boolean('compulsory').notNull().default(true),
+    choiceGroup: varchar('choice_group', { length: 100 }),
+    candidateTopics: jsonb('candidate_topics').notNull().default([]),
+    topicId: uuid('topic_id').references(() => academicNodes.id, { onDelete: 'set null' }),
+    topicConfidence: numeric('topic_confidence', { precision: 4, scale: 3 }),
+    difficulty: varchar('difficulty', { length: 50 }).notNull().default('medium'),
+    difficultyUncertainty: numeric('difficulty_uncertainty', { precision: 4, scale: 3 }).default(
+      '0.200',
+    ),
+    cognitiveLevel: varchar('cognitive_level', { length: 50 }),
+    verificationStatus: varchar('verification_status', { length: 50 })
+      .notNull()
+      .default('extracted'),
+    userNotes: text('user_notes'),
+    sourceSnippet: text('source_snippet'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index('examination_questions_paper_id_idx').on(table.paperId),
+    index('examination_questions_user_id_idx').on(table.userId),
+    index('examination_questions_course_id_idx').on(table.courseId),
+    index('examination_questions_topic_id_idx').on(table.topicId),
+  ],
+);
+
+export type ExaminationQuestionRow = typeof examinationQuestions.$inferSelect;
+export type NewExaminationQuestionRow = typeof examinationQuestions.$inferInsert;
+
+/**
+ * Table: practice_assessments
+ *
+ * Generated, structure-matched practice examinations.
+ */
+export const practiceAssessments = pgTable(
+  'practice_assessments',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    courseId: uuid('course_id')
+      .notNull()
+      .references(() => courses.id, { onDelete: 'cascade' }),
+    title: varchar('title', { length: 255 }).notNull(),
+    format: varchar('format', { length: 50 }).notNull().default('standard'),
+    blueprintId: uuid('blueprint_id').references(() => examinationPapers.id, {
+      onDelete: 'set null',
+    }),
+    totalMarks: numeric('total_marks', { precision: 6, scale: 2 }).notNull().default('50.00'),
+    durationMinutes: integer('duration_minutes').notNull().default(60),
+    difficulty: varchar('difficulty', { length: 50 }).notNull().default('medium'),
+    status: varchar('status', { length: 50 }).notNull().default('ready'),
+    questions: jsonb('questions').notNull().default([]),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index('practice_assessments_user_id_idx').on(table.userId),
+    index('practice_assessments_course_id_idx').on(table.courseId),
+  ],
+);
+
+export type PracticeAssessmentRow = typeof practiceAssessments.$inferSelect;
+export type NewPracticeAssessmentRow = typeof practiceAssessments.$inferInsert;
+
+/**
+ * Table: practice_submissions
+ *
+ * Student attempts, submitted answers, and diagnostic feedback reports.
+ */
+export const practiceSubmissions = pgTable(
+  'practice_submissions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    assessmentId: uuid('assessment_id')
+      .notNull()
+      .references(() => practiceAssessments.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    courseId: uuid('course_id')
+      .notNull()
+      .references(() => courses.id, { onDelete: 'cascade' }),
+    startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
+    submittedAt: timestamp('submitted_at', { withTimezone: true }),
+    timeSpentSeconds: integer('time_spent_seconds').notNull().default(0),
+    answers: jsonb('answers').notNull().default({}),
+    diagnosticFeedback: jsonb('diagnostic_feedback'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index('practice_submissions_assessment_id_idx').on(table.assessmentId),
+    index('practice_submissions_user_id_idx').on(table.userId),
+    index('practice_submissions_course_id_idx').on(table.courseId),
+  ],
+);
+
+export type PracticeSubmissionRow = typeof practiceSubmissions.$inferSelect;
+export type NewPracticeSubmissionRow = typeof practiceSubmissions.$inferInsert;
+
+/**
+ * Table: ai_usage_records
+ *
+ * Auditable server-side log of AI task executions, token consumption, and costs.
+ */
+export const aiUsageRecords = pgTable(
+  'ai_usage_records',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    taskType: varchar('task_type', { length: 100 }).notNull(),
+    taskVersion: varchar('task_version', { length: 50 }).notNull(),
+    model: varchar('model', { length: 100 }).notNull(),
+    provider: varchar('provider', { length: 50 }).notNull(),
+    inputTokens: integer('input_tokens').default(0),
+    outputTokens: integer('output_tokens').default(0),
+    estimatedCostMicroCents: integer('estimated_cost_micro_cents').default(0),
+    durationMs: integer('duration_ms').default(0),
+    status: varchar('status', { length: 50 }).notNull().default('success'),
+    contentHash: varchar('content_hash', { length: 64 }),
+    cached: boolean('cached').default(false),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index('ai_usage_records_user_id_idx').on(table.userId),
+    index('ai_usage_records_created_at_idx').on(table.createdAt),
+  ],
+);
+
+export type AiUsageRecordRow = typeof aiUsageRecords.$inferSelect;
+export type NewAiUsageRecordRow = typeof aiUsageRecords.$inferInsert;

@@ -16,6 +16,7 @@ interface AcademicMapTreeProps {
   courseTitle: string;
   nodes: AcademicNodeWithResources[];
   onNodeUpdated?: () => void;
+  onSelectTopic?: (topic: AcademicNodeWithResources) => void;
 }
 
 export function AcademicMapTree({
@@ -23,6 +24,7 @@ export function AcademicMapTree({
   courseTitle,
   nodes,
   onNodeUpdated,
+  onSelectTopic,
 }: AcademicMapTreeProps) {
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState('');
@@ -271,7 +273,17 @@ export function AcademicMapTree({
                                     </button>
                                   </div>
                                 ) : (
-                                  <span className="truncate text-[var(--cf-text-primary)] font-medium">
+                                  <span
+                                    onClick={() => onSelectTopic && onSelectTopic(top)}
+                                    className={`truncate text-[var(--cf-text-primary)] font-medium ${
+                                      onSelectTopic
+                                        ? 'cursor-pointer hover:text-[var(--cf-primary)] transition-colors'
+                                        : ''
+                                    }`}
+                                    title={
+                                      onSelectTopic ? 'Open topic learning workspace' : undefined
+                                    }
+                                  >
                                     {top.title}
                                   </span>
                                 )}

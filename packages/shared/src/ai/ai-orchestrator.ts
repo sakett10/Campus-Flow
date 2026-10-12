@@ -1,0 +1,302 @@
+import { createHash } from 'node:crypto';
+import { z } from 'zod';
+import { AppError } from '../errors.js';
+import { createLogger } from '../logger.js';
+import type { AiProvider } from '../ai-provider.js';
+import { defaultAiUsageController, type AiUsageController } from './ai-usage-control.js';
+import type { AiTaskType } from '@campusflow/types';
+
+const logger = createLogger({ module: 'ai_orchestrator' });
+
+export interface AiTaskDefinition<TInput, TOutput> {
+  taskType: AiTaskType;
+  version: string;
+  systemPrompt: string;
+  buildPrompt: (input: TInput) => string;
+  outputSchema: z.ZodSchema<TOutput>;
+  deterministicFallback?: (input: TInput) => TOutput | null;
+  maxRetries?: number;
+  timeoutMs?: number;
+}
+
+export interface AiTaskOptions {
+  userId: string;
+  bypassCache?: boolean;
+  contentHash?: string;
+  contextChunks?: Array<{ id: string; content: string; sourceTitle: string }>;
+}
+
+export interface AiTaskExecutionResult<TOutput> {
+  data: TOutput;
+  isFallback: boolean;
+  fallbackReason?: string;
+  cached: boolean;
+  metadata: {
+    taskType: AiTaskType;
+    version: string;
+    model: string;
+    provider: string;
+    durationMs: number;
+    inputTokens: number;
+    outputTokens: number;
+    costMicroCents: number;
+    executionTimestamp: string;
+  };
+}
+
+export class AiOrchestrator {
+  private provider: AiProvider | null;
+  private providerName: string;
+  private modelName: string;
+  private usageController: AiUsageController;
+  private cache: Map<string, { data: unknown; timestamp: number }> = new Map();
+
+  constructor(options?: {
+    provider?: AiProvider | null;
+    providerName?: string;
+    modelName?: string;
+    usageController?: AiUsageController;
+  }) {
+    this.provider = options?.provider ?? null;
+    this.providerName = options?.providerName || process.env['AI_PROVIDER'] || 'stub';
+    this.modelName = options?.modelName || process.env['AI_MODEL'] || 'default-model';
+    this.usageController = options?.usageController || defaultAiUsageController;
+  }
+
+  setProvider(provider: AiProvider | null, name: string, model: string): void {
+    this.provider = provider;
+    this.providerName = name;
+    this.modelName = model;
+  }
+
+  getProviderInfo(): { provider: string; model: string; isConfigured: boolean } {
+    return {
+      provider: this.providerName,
+      model: this.modelName,
+      isConfigured: !!this.provider,
+    };
+  }
+
+  /**
+   * Executes a typed AI task with usage budgeting, Zod schema validation,
+   * bounded retries with backoff, deterministic caching, and explicit fallback.
+   */
+  async runTask<TInput, TOutput>(
+    task: AiTaskDefinition<TInput, TOutput>,
+    input: TInput,
+    options: AiTaskOptions,
+  ): Promise<AiTaskExecutionResult<TOutput>> {
+    const startTime = Date.now();
+    const promptBody = task.buildPrompt(input);
+    const inputChars = promptBody.length;
+
+    // 1. Quota & Rate Limit Pre-Check
+    await this.usageController.checkQuota(options.userId, inputChars, task.taskType);
+
+    // 2. Cache Key Generation (Scoped by userId to prevent cross-tenant data leakage)
+    const cacheContent =
+      options.contentHash || createHash('sha256').update(promptBody).digest('hex');
+    const cacheKey = `${options.userId}:${task.taskType}:${task.version}:${this.modelName}:${cacheContent}`;
+
+    if (!options.bypassCache && this.cache.has(cacheKey)) {
+      const cachedEntry = this.cache.get(cacheKey)!;
+      logger.info('Returning cached AI task result', {
+        taskType: task.taskType,
+        version: task.version,
+        userId: options.userId,
+      });
+
+      return {
+        data: cachedEntry.data as TOutput,
+        isFallback: false,
+        cached: true,
+        metadata: {
+          taskType: task.taskType,
+          version: task.version,
+          model: this.modelName,
+          provider: this.providerName,
+          durationMs: Date.now() - startTime,
+          inputTokens: 0,
+          outputTokens: 0,
+          costMicroCents: 0,
+          executionTimestamp: new Date().toISOString(),
+        },
+      };
+    }
+
+    // 3. Concurrency Acquisition
+    const releaseConcurrency = await this.usageController.acquireConcurrency(options.userId);
+
+    try {
+      // 4. Fallback execution if provider is unconfigured or unavailable
+      if (!this.provider) {
+        if (task.deterministicFallback) {
+          const fallbackData = task.deterministicFallback(input);
+          if (fallbackData !== null) {
+            logger.warn(
+              'AI provider unconfigured; using clearly identified deterministic fallback',
+              {
+                taskType: task.taskType,
+                userId: options.userId,
+              },
+            );
+
+            return {
+              data: fallbackData,
+              isFallback: true,
+              fallbackReason:
+                'AI provider is not configured. Result generated by deterministic parser.',
+              cached: false,
+              metadata: {
+                taskType: task.taskType,
+                version: task.version,
+                model: 'deterministic-fallback',
+                provider: 'local-fallback',
+                durationMs: Date.now() - startTime,
+                inputTokens: 0,
+                outputTokens: 0,
+                costMicroCents: 0,
+                executionTimestamp: new Date().toISOString(),
+              },
+            };
+          }
+        }
+
+        throw AppError.internal(
+          `AI capabilities are currently unavailable for task "${task.taskType}". No AI provider is configured and safe fallback is not applicable.`,
+        );
+      }
+
+      // 5. Model Execution with Bounded Retries & Exponential Backoff
+      const maxRetries = task.maxRetries ?? 2;
+      let lastError: Error | null = null;
+      let attempt = 0;
+
+      while (attempt <= maxRetries) {
+        attempt++;
+        try {
+          const timeoutMs = task.timeoutMs || 30_000;
+          const extractionResponse = await Promise.race([
+            this.provider.extract<unknown>({
+              systemPrompt: task.systemPrompt,
+              content: promptBody,
+              targetSchemaName: `${task.taskType}_${task.version}`,
+            }),
+            new Promise<never>((_, reject) =>
+              setTimeout(
+                () =>
+                  reject(
+                    new AppError('TIMEOUT', `AI task timed out after ${timeoutMs / 1000}s`, 408),
+                  ),
+                timeoutMs,
+              ),
+            ),
+          ]);
+
+          // 6. Strict Runtime Schema Validation
+          const parsed = task.outputSchema.safeParse(extractionResponse);
+          if (!parsed.success) {
+            throw new Error(
+              `Model output failed schema validation: ${JSON.stringify(parsed.error.format())}`,
+            );
+          }
+
+          const durationMs = Date.now() - startTime;
+          const approxInputTokens = Math.ceil(inputChars / 4);
+          const approxOutputTokens = Math.ceil(JSON.stringify(parsed.data).length / 4);
+          const costMicroCents = Math.round(approxInputTokens * 0.1 + approxOutputTokens * 0.3);
+
+          // 7. Record Usage
+          await this.usageController.recordExecution({
+            userId: options.userId,
+            taskType: task.taskType,
+            taskVersion: task.version,
+            model: this.modelName,
+            provider: this.providerName,
+            inputTokens: approxInputTokens,
+            outputTokens: approxOutputTokens,
+            estimatedCostMicroCents: costMicroCents,
+            durationMs,
+            status: 'success',
+            contentHash: cacheContent,
+            cached: false,
+          });
+
+          // 8. Cache result
+          this.cache.set(cacheKey, { data: parsed.data, timestamp: Date.now() });
+
+          return {
+            data: parsed.data,
+            isFallback: false,
+            cached: false,
+            metadata: {
+              taskType: task.taskType,
+              version: task.version,
+              model: this.modelName,
+              provider: this.providerName,
+              durationMs,
+              inputTokens: approxInputTokens,
+              outputTokens: approxOutputTokens,
+              costMicroCents,
+              executionTimestamp: new Date().toISOString(),
+            },
+          };
+        } catch (err) {
+          lastError = err as Error;
+          logger.warn(`AI task attempt ${attempt}/${maxRetries + 1} failed`, {
+            taskType: task.taskType,
+            attempt,
+            error: lastError.message,
+          });
+
+          if (attempt <= maxRetries) {
+            // Exponential backoff with jitter
+            const delayMs = Math.min(1000 * Math.pow(2, attempt - 1) + Math.random() * 200, 5000);
+            await new Promise((resolve) => setTimeout(resolve, delayMs));
+          }
+        }
+      }
+
+      // If all retries failed, attempt safe deterministic fallback if available
+      if (task.deterministicFallback) {
+        const fallback = task.deterministicFallback(input);
+        if (fallback !== null) {
+          logger.warn('AI task retries exhausted; switching to deterministic fallback', {
+            taskType: task.taskType,
+            error: lastError?.message,
+          });
+
+          return {
+            data: fallback,
+            isFallback: true,
+            fallbackReason: `Model execution failed: ${lastError?.message}. Generated using deterministic fallback.`,
+            cached: false,
+            metadata: {
+              taskType: task.taskType,
+              version: task.version,
+              model: 'deterministic-fallback',
+              provider: 'local-fallback',
+              durationMs: Date.now() - startTime,
+              inputTokens: 0,
+              outputTokens: 0,
+              costMicroCents: 0,
+              executionTimestamp: new Date().toISOString(),
+            },
+          };
+        }
+      }
+
+      throw AppError.internal(
+        `AI processing failed for task "${task.taskType}" after ${maxRetries + 1} attempts: ${lastError?.message}`,
+      );
+    } finally {
+      releaseConcurrency();
+    }
+  }
+
+  clearCache(): void {
+    this.cache.clear();
+  }
+}
+
+export const defaultAiOrchestrator = new AiOrchestrator();

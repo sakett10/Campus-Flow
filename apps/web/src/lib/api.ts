@@ -35,22 +35,94 @@ import type {
   StudyStateValue,
   StudyEventType,
   TodayOverviewResponse,
+  SyllabusExtractedCourse,
+  TopicResource,
+  TopicResourceType,
+  TopicResourceVerificationStatus,
+  StudyPlan,
+  StudySession,
+  PlanWorkloadWarning,
+  ExaminationPaper,
+  ExaminationQuestion,
+  ExamPaperStructuralAnalysis,
+  ExamTopicAnalysis,
+  CrossPaperComparisonReport,
+  PracticeAssessment,
+  PracticeQuestion,
+  PracticeSubmission,
+  QuestionDiagnosticFeedback,
+  PracticeDiagnosticReport,
+  AiUsageQuotaStatus,
 } from '@campusflow/types';
 
 const API_BASE = process.env['NEXT_PUBLIC_API_URL'] || 'http://localhost:3001/api/v1';
 
-// Default mock headers for local development
-function getHeaders(): HeadersInit {
-  return {
-    'content-type': 'application/json',
-    'x-test-user-id': '11111111-1111-4111-a111-111111111111',
-  };
+let staticAuthToken: string | null = null;
+
+export function setApiAuthToken(token: string | null): void {
+  staticAuthToken = token;
+}
+
+export function getApiAuthToken(): string | null {
+  return staticAuthToken;
+}
+
+export async function getClerkSessionToken(forceRefresh = false): Promise<string | null> {
+  if (typeof window !== 'undefined') {
+    try {
+      const clerk = (
+        window as unknown as {
+          Clerk?: {
+            session?: {
+              getToken: (options?: { skipCache?: boolean }) => Promise<string | null>;
+            };
+          };
+        }
+      ).Clerk;
+      if (clerk?.session?.getToken) {
+        const token = await clerk.session.getToken({ skipCache: forceRefresh });
+        if (token) {
+          return token;
+        }
+      }
+    } catch {
+      // Ignore
+    }
+  }
+  return staticAuthToken;
+}
+
+export async function getAuthHeaders(
+  tokenOverride?: string | null,
+  includeContentType = true,
+  forceRefresh = false,
+): Promise<HeadersInit> {
+  let token = tokenOverride;
+  if (!token) {
+    token = await getClerkSessionToken(forceRefresh);
+  }
+  if (!token && staticAuthToken) {
+    token = staticAuthToken;
+  }
+
+  const headers: Record<string, string> = {};
+  if (includeContentType) {
+    headers['content-type'] = 'application/json';
+  }
+
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  } else if (process.env['NODE_ENV'] !== 'production') {
+    headers['x-test-user-id'] = '11111111-1111-4111-a111-111111111111';
+  }
+
+  return headers;
 }
 
 export async function fetchCourses(): Promise<Course[]> {
   try {
     const res = await fetch(`${API_BASE}/courses`, {
-      headers: getHeaders(),
+      headers: await getAuthHeaders(),
       cache: 'no-store',
     });
     if (!res.ok) throw new Error('Failed to fetch courses');
@@ -85,7 +157,7 @@ export async function fetchCourses(): Promise<Course[]> {
 export async function fetchCourse(id: string): Promise<Course | null> {
   try {
     const res = await fetch(`${API_BASE}/courses/${id}`, {
-      headers: getHeaders(),
+      headers: await getAuthHeaders(),
       cache: 'no-store',
     });
     if (!res.ok) return null;
@@ -103,7 +175,7 @@ export async function createCourse(data: {
 }): Promise<Course> {
   const res = await fetch(`${API_BASE}/courses`, {
     method: 'POST',
-    headers: getHeaders(),
+    headers: await getAuthHeaders(),
     body: JSON.stringify(data),
   });
   if (!res.ok) {
@@ -117,7 +189,7 @@ export async function fetchResources(courseId?: string): Promise<Resource[]> {
   try {
     const url = courseId ? `${API_BASE}/resources?courseId=${courseId}` : `${API_BASE}/resources`;
     const res = await fetch(url, {
-      headers: getHeaders(),
+      headers: await getAuthHeaders(),
       cache: 'no-store',
     });
     if (!res.ok) throw new Error('Failed to fetch resources');
@@ -146,7 +218,7 @@ export async function fetchResources(courseId?: string): Promise<Resource[]> {
 export async function fetchResource(id: string): Promise<Resource | null> {
   try {
     const res = await fetch(`${API_BASE}/resources/${id}`, {
-      headers: getHeaders(),
+      headers: await getAuthHeaders(),
       cache: 'no-store',
     });
     if (!res.ok) return null;
@@ -160,7 +232,7 @@ export async function fetchResource(id: string): Promise<Resource | null> {
 export async function fetchResourceChunks(resourceId: string): Promise<ResourceChunk[]> {
   try {
     const res = await fetch(`${API_BASE}/resources/${resourceId}/chunks`, {
-      headers: getHeaders(),
+      headers: await getAuthHeaders(),
       cache: 'no-store',
     });
     if (!res.ok) return [];
@@ -206,7 +278,7 @@ export async function fetchResourceChunks(resourceId: string): Promise<ResourceC
 export async function deleteResource(id: string): Promise<void> {
   const res = await fetch(`${API_BASE}/resources/${id}`, {
     method: 'DELETE',
-    headers: getHeaders(),
+    headers: await getAuthHeaders(),
   });
   if (!res.ok) {
     throw new Error('Failed to delete resource');
@@ -216,7 +288,7 @@ export async function deleteResource(id: string): Promise<void> {
 export async function retryResource(id: string): Promise<Resource> {
   const res = await fetch(`${API_BASE}/resources/${id}/retry`, {
     method: 'POST',
-    headers: getHeaders(),
+    headers: await getAuthHeaders(),
   });
   if (!res.ok) {
     throw new Error('Failed to retry resource processing');
@@ -227,7 +299,7 @@ export async function retryResource(id: string): Promise<Resource> {
 export async function fetchAcademicMap(courseId: string): Promise<AcademicNodeWithResources[]> {
   try {
     const res = await fetch(`${API_BASE}/courses/${courseId}/map`, {
-      headers: getHeaders(),
+      headers: await getAuthHeaders(),
       cache: 'no-store',
     });
     if (!res.ok) return [];
@@ -321,7 +393,7 @@ export async function createAcademicNodes(
 ): Promise<AcademicNode[]> {
   const res = await fetch(`${API_BASE}/courses/${courseId}/map`, {
     method: 'POST',
-    headers: getHeaders(),
+    headers: await getAuthHeaders(),
     body: JSON.stringify({ nodes }),
   });
   if (!res.ok) throw new Error('Failed to create academic nodes');
@@ -341,7 +413,7 @@ export async function updateAcademicNode(
 ): Promise<AcademicNode> {
   const res = await fetch(`${API_BASE}/courses/${courseId}/map/nodes/${nodeId}`, {
     method: 'PUT',
-    headers: getHeaders(),
+    headers: await getAuthHeaders(),
     body: JSON.stringify(updates),
   });
   if (!res.ok) throw new Error('Failed to update academic node');
@@ -351,7 +423,7 @@ export async function updateAcademicNode(
 export async function deleteAcademicNode(courseId: string, nodeId: string): Promise<void> {
   const res = await fetch(`${API_BASE}/courses/${courseId}/map/nodes/${nodeId}`, {
     method: 'DELETE',
-    headers: getHeaders(),
+    headers: await getAuthHeaders(),
   });
   if (!res.ok) throw new Error('Failed to delete academic node');
 }
@@ -368,7 +440,7 @@ export async function linkResourceToTopic(
 ): Promise<AcademicNodeResourceLink> {
   const res = await fetch(`${API_BASE}/courses/${courseId}/map/nodes/${nodeId}/resources`, {
     method: 'POST',
-    headers: getHeaders(),
+    headers: await getAuthHeaders(),
     body: JSON.stringify(data),
   });
   if (!res.ok) throw new Error('Failed to link resource to topic');
@@ -378,7 +450,7 @@ export async function linkResourceToTopic(
 export async function unlinkResourceFromTopic(courseId: string, linkId: string): Promise<void> {
   const res = await fetch(`${API_BASE}/courses/${courseId}/map/links/${linkId}`, {
     method: 'DELETE',
-    headers: getHeaders(),
+    headers: await getAuthHeaders(),
   });
   if (!res.ok) throw new Error('Failed to unlink resource from topic');
 }
@@ -392,7 +464,7 @@ export async function searchContent(
     : `${API_BASE}/search?q=${encodeURIComponent(query)}`;
 
   const res = await fetch(url, {
-    headers: getHeaders(),
+    headers: await getAuthHeaders(),
   });
   if (!res.ok) {
     return { query, totalResults: 0, results: [] };
@@ -415,7 +487,7 @@ export async function fetchOpportunities(filters?: {
     const qs = params.toString() ? `?${params.toString()}` : '';
 
     const res = await fetch(`${API_BASE}/opportunities${qs}`, {
-      headers: getHeaders(),
+      headers: await getAuthHeaders(),
       cache: 'no-store',
     });
     if (!res.ok) throw new Error('Failed to fetch opportunities');
@@ -437,7 +509,7 @@ export interface OpportunityWithRelations extends Opportunity {
 export async function fetchOpportunityDetail(id: string): Promise<OpportunityWithRelations | null> {
   try {
     const res = await fetch(`${API_BASE}/opportunities/${id}`, {
-      headers: getHeaders(),
+      headers: await getAuthHeaders(),
       cache: 'no-store',
     });
     if (!res.ok) return null;
@@ -451,7 +523,7 @@ export async function evaluateOpportunity(id: string): Promise<OpportunityEvalua
   try {
     const res = await fetch(`${API_BASE}/opportunities/${id}/evaluate`, {
       method: 'POST',
-      headers: getHeaders(),
+      headers: await getAuthHeaders(),
     });
     if (!res.ok) return null;
     return await res.json();
@@ -465,7 +537,7 @@ export async function fetchPredictionTransparency(
 ): Promise<PredictionTransparencyRecord | null> {
   try {
     const res = await fetch(`${API_BASE}/opportunities/${id}/transparency`, {
-      headers: getHeaders(),
+      headers: await getAuthHeaders(),
       cache: 'no-store',
     });
     if (!res.ok) return null;
@@ -478,7 +550,7 @@ export async function fetchPredictionTransparency(
 export async function fetchCareerProfile(): Promise<StudentCareerProfile | null> {
   try {
     const res = await fetch(`${API_BASE}/career/profile`, {
-      headers: getHeaders(),
+      headers: await getAuthHeaders(),
       cache: 'no-store',
     });
     if (!res.ok) return null;
@@ -493,7 +565,7 @@ export async function saveCareerProfile(
 ): Promise<StudentCareerProfile> {
   const res = await fetch(`${API_BASE}/career/profile`, {
     method: 'PUT',
-    headers: getHeaders(),
+    headers: await getAuthHeaders(),
     body: JSON.stringify(data),
   });
   if (!res.ok) {
@@ -506,7 +578,7 @@ export async function saveCareerProfile(
 export async function fetchRoleFamilies(): Promise<RoleFamily[]> {
   try {
     const res = await fetch(`${API_BASE}/career/role-families`, {
-      headers: getHeaders(),
+      headers: await getAuthHeaders(),
       cache: 'no-store',
     });
     if (!res.ok) return [];
@@ -521,7 +593,7 @@ export async function fetchTargetRoles(): Promise<
 > {
   try {
     const res = await fetch(`${API_BASE}/career/target-roles`, {
-      headers: getHeaders(),
+      headers: await getAuthHeaders(),
       cache: 'no-store',
     });
     if (!res.ok) return [];
@@ -537,7 +609,7 @@ export async function addTargetRole(
 ): Promise<StudentTargetRole> {
   const res = await fetch(`${API_BASE}/career/target-roles`, {
     method: 'POST',
-    headers: getHeaders(),
+    headers: await getAuthHeaders(),
     body: JSON.stringify({ roleFamilyId, priority }),
   });
   if (!res.ok) throw new Error('Failed to add target role');
@@ -547,7 +619,7 @@ export async function addTargetRole(
 export async function removeTargetRole(roleFamilyId: string): Promise<void> {
   const res = await fetch(`${API_BASE}/career/target-roles/${roleFamilyId}`, {
     method: 'DELETE',
-    headers: getHeaders(),
+    headers: await getAuthHeaders(),
   });
   if (!res.ok) throw new Error('Failed to remove target role');
 }
@@ -555,7 +627,7 @@ export async function removeTargetRole(roleFamilyId: string): Promise<void> {
 export async function fetchSkillEvidence(): Promise<StudentSkillEvidence[]> {
   try {
     const res = await fetch(`${API_BASE}/career/evidence`, {
-      headers: getHeaders(),
+      headers: await getAuthHeaders(),
       cache: 'no-store',
     });
     if (!res.ok) return [];
@@ -570,7 +642,7 @@ export async function addSkillEvidence(
 ): Promise<StudentSkillEvidence> {
   const res = await fetch(`${API_BASE}/career/evidence`, {
     method: 'POST',
-    headers: getHeaders(),
+    headers: await getAuthHeaders(),
     body: JSON.stringify(data),
   });
   if (!res.ok) {
@@ -583,7 +655,7 @@ export async function addSkillEvidence(
 export async function deleteSkillEvidence(id: string): Promise<void> {
   const res = await fetch(`${API_BASE}/career/evidence/${id}`, {
     method: 'DELETE',
-    headers: getHeaders(),
+    headers: await getAuthHeaders(),
   });
   if (!res.ok) throw new Error('Failed to delete skill evidence');
 }
@@ -596,7 +668,7 @@ export async function fetchActionPlan(): Promise<{
 }> {
   try {
     const res = await fetch(`${API_BASE}/career/action-plan`, {
-      headers: getHeaders(),
+      headers: await getAuthHeaders(),
       cache: 'no-store',
     });
     if (!res.ok) throw new Error('Failed to fetch action plan');
@@ -616,7 +688,7 @@ export async function fetchApplications(): Promise<
 > {
   try {
     const res = await fetch(`${API_BASE}/applications`, {
-      headers: getHeaders(),
+      headers: await getAuthHeaders(),
       cache: 'no-store',
     });
     if (!res.ok) return [];
@@ -632,7 +704,7 @@ export async function createApplication(
 ): Promise<ApplicationRecord> {
   const res = await fetch(`${API_BASE}/applications`, {
     method: 'POST',
-    headers: getHeaders(),
+    headers: await getAuthHeaders(),
     body: JSON.stringify({ opportunityId, notes }),
   });
   if (!res.ok) {
@@ -649,7 +721,7 @@ export async function updateApplicationStatus(
 ): Promise<ApplicationRecord> {
   const res = await fetch(`${API_BASE}/applications/${id}`, {
     method: 'PATCH',
-    headers: getHeaders(),
+    headers: await getAuthHeaders(),
     body: JSON.stringify({ status, notes }),
   });
   if (!res.ok) throw new Error('Failed to update application status');
@@ -659,7 +731,7 @@ export async function updateApplicationStatus(
 export async function fetchOpportunityLandscape(): Promise<OpportunityLandscapeSummary> {
   try {
     const res = await fetch(`${API_BASE}/opportunities/landscape`, {
-      headers: getHeaders(),
+      headers: await getAuthHeaders(),
       cache: 'no-store',
     });
     if (!res.ok) throw new Error('Failed to fetch opportunity landscape');
@@ -680,7 +752,7 @@ export async function fetchStudentSavedOpportunities(): Promise<
 > {
   try {
     const res = await fetch(`${API_BASE}/career/saved-opportunities`, {
-      headers: getHeaders(),
+      headers: await getAuthHeaders(),
       cache: 'no-store',
     });
     if (!res.ok) return [];
@@ -695,7 +767,7 @@ export async function createStudentSavedOpportunity(
 ): Promise<StudentSavedOpportunity> {
   const res = await fetch(`${API_BASE}/career/saved-opportunities`, {
     method: 'POST',
-    headers: getHeaders(),
+    headers: await getAuthHeaders(),
     body: JSON.stringify(data),
   });
   if (!res.ok) {
@@ -711,7 +783,7 @@ export async function updateStudentSavedOpportunity(
 ): Promise<StudentSavedOpportunity> {
   const res = await fetch(`${API_BASE}/career/saved-opportunities/${id}`, {
     method: 'PATCH',
-    headers: getHeaders(),
+    headers: await getAuthHeaders(),
     body: JSON.stringify(updates),
   });
   if (!res.ok) throw new Error('Failed to update saved opportunity');
@@ -721,7 +793,7 @@ export async function updateStudentSavedOpportunity(
 export async function deleteStudentSavedOpportunity(id: string): Promise<void> {
   const res = await fetch(`${API_BASE}/career/saved-opportunities/${id}`, {
     method: 'DELETE',
-    headers: getHeaders(),
+    headers: await getAuthHeaders(),
   });
   if (!res.ok) throw new Error('Failed to delete saved opportunity');
 }
@@ -732,7 +804,7 @@ export async function syncAcademicEvidence(): Promise<{
 }> {
   const res = await fetch(`${API_BASE}/career/evidence/sync-academic`, {
     method: 'POST',
-    headers: getHeaders(),
+    headers: await getAuthHeaders(),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: 'Failed to sync academic evidence' }));
@@ -751,7 +823,7 @@ export async function fetchAssessments(courseId?: string): Promise<AssessmentWit
       ? `${API_BASE}/assessments?courseId=${courseId}`
       : `${API_BASE}/assessments`;
     const res = await fetch(url, {
-      headers: getHeaders(),
+      headers: await getAuthHeaders(),
       cache: 'no-store',
     });
     if (!res.ok) throw new Error('Failed to fetch assessments');
@@ -764,7 +836,7 @@ export async function fetchAssessments(courseId?: string): Promise<AssessmentWit
 export async function fetchAssessment(id: string): Promise<AssessmentWithTopics | null> {
   try {
     const res = await fetch(`${API_BASE}/assessments/${id}`, {
-      headers: getHeaders(),
+      headers: await getAuthHeaders(),
       cache: 'no-store',
     });
     if (!res.ok) return null;
@@ -785,7 +857,7 @@ export async function createAssessment(data: {
 }): Promise<Assessment> {
   const res = await fetch(`${API_BASE}/assessments`, {
     method: 'POST',
-    headers: getHeaders(),
+    headers: await getAuthHeaders(),
     body: JSON.stringify(data),
   });
   if (!res.ok) {
@@ -808,7 +880,7 @@ export async function updateAssessment(
 ): Promise<Assessment> {
   const res = await fetch(`${API_BASE}/assessments/${id}`, {
     method: 'PUT',
-    headers: getHeaders(),
+    headers: await getAuthHeaders(),
     body: JSON.stringify(updates),
   });
   if (!res.ok) {
@@ -821,7 +893,7 @@ export async function updateAssessment(
 export async function deleteAssessment(id: string): Promise<void> {
   const res = await fetch(`${API_BASE}/assessments/${id}`, {
     method: 'DELETE',
-    headers: getHeaders(),
+    headers: await getAuthHeaders(),
   });
   if (!res.ok) {
     throw new Error('Failed to delete assessment');
@@ -839,7 +911,7 @@ export async function linkTopicToAssessment(
 ): Promise<AssessmentTopicLink> {
   const res = await fetch(`${API_BASE}/assessments/${assessmentId}/topics`, {
     method: 'POST',
-    headers: getHeaders(),
+    headers: await getAuthHeaders(),
     body: JSON.stringify(data),
   });
   if (!res.ok) {
@@ -855,7 +927,7 @@ export async function unlinkTopicFromAssessment(
 ): Promise<void> {
   const res = await fetch(`${API_BASE}/assessments/${assessmentId}/topics/${topicId}`, {
     method: 'DELETE',
-    headers: getHeaders(),
+    headers: await getAuthHeaders(),
   });
   if (!res.ok) {
     throw new Error('Failed to unlink topic from assessment');
@@ -869,7 +941,7 @@ export async function unlinkTopicFromAssessment(
 export async function fetchCourseStudyStates(courseId: string): Promise<TopicStudyState[]> {
   try {
     const res = await fetch(`${API_BASE}/courses/${courseId}/study-state`, {
-      headers: getHeaders(),
+      headers: await getAuthHeaders(),
       cache: 'no-store',
     });
     if (!res.ok) return [];
@@ -885,7 +957,7 @@ export async function fetchTopicStudyState(
 ): Promise<TopicStudyState | null> {
   try {
     const res = await fetch(`${API_BASE}/courses/${courseId}/topics/${topicId}/study-state`, {
-      headers: getHeaders(),
+      headers: await getAuthHeaders(),
       cache: 'no-store',
     });
     if (!res.ok) return null;
@@ -904,7 +976,7 @@ export async function updateTopicStudyState(
 ): Promise<{ studyState: TopicStudyState; event: StudyEvent }> {
   const res = await fetch(`${API_BASE}/courses/${courseId}/topics/${topicId}/study-state`, {
     method: 'PUT',
-    headers: getHeaders(),
+    headers: await getAuthHeaders(),
     body: JSON.stringify({ state, eventType, metadata }),
   });
   if (!res.ok) {
@@ -920,7 +992,7 @@ export async function fetchTopicStudyEvents(
 ): Promise<StudyEvent[]> {
   try {
     const res = await fetch(`${API_BASE}/courses/${courseId}/topics/${topicId}/study-events`, {
-      headers: getHeaders(),
+      headers: await getAuthHeaders(),
       cache: 'no-store',
     });
     if (!res.ok) return [];
@@ -938,7 +1010,7 @@ export async function recordTopicStudyEvent(
 ): Promise<{ studyState: TopicStudyState; event: StudyEvent }> {
   const res = await fetch(`${API_BASE}/courses/${courseId}/topics/${topicId}/study-events`, {
     method: 'POST',
-    headers: getHeaders(),
+    headers: await getAuthHeaders(),
     body: JSON.stringify({ type, metadata }),
   });
   if (!res.ok) {
@@ -948,14 +1020,18 @@ export async function recordTopicStudyEvent(
   return await res.json();
 }
 
-export async function fetchTodayOverview(timezone?: string): Promise<TodayOverviewResponse | null> {
+export async function fetchTodayOverview(
+  timezone?: string,
+  token?: string | null,
+): Promise<TodayOverviewResponse | null> {
   try {
     const tz =
       timezone ||
       (typeof Intl !== 'undefined' ? Intl.DateTimeFormat().resolvedOptions().timeZone : 'UTC');
     const url = `${API_BASE}/today${tz ? `?timezone=${encodeURIComponent(tz)}` : ''}`;
+    const headers = await getAuthHeaders(token);
     const res = await fetch(url, {
-      headers: getHeaders(),
+      headers,
       cache: 'no-store',
     });
     if (!res.ok) return null;
@@ -963,4 +1039,473 @@ export async function fetchTodayOverview(timezone?: string): Promise<TodayOvervi
   } catch {
     return null;
   }
+}
+
+// ==========================================
+// Learning Universe: Syllabus & Course Generation API
+// ==========================================
+
+export async function extractSyllabus(
+  input: {
+    file?: File;
+    text?: string;
+    resourceId?: string;
+  },
+  tokenOverride?: string | null,
+): Promise<{
+  extractedCourse: SyllabusExtractedCourse;
+  resourceId?: string;
+  warnings?: string[];
+}> {
+  const token = tokenOverride || (await getClerkSessionToken(true));
+  let headers = await getAuthHeaders(token, !input.file);
+
+  let body: FormData | string;
+  if (input.file) {
+    const formData = new FormData();
+    formData.append('file', input.file);
+    body = formData;
+  } else {
+    body = JSON.stringify(input);
+  }
+
+  let res = await fetch(`${API_BASE}/courses/extract-syllabus`, {
+    method: 'POST',
+    headers,
+    body,
+  });
+
+  // Safe 1-time retry on confirmed authentication rejection
+  if (res.status === 401) {
+    const freshToken = await getClerkSessionToken(true);
+    if (freshToken && freshToken !== token) {
+      headers = await getAuthHeaders(freshToken, !input.file);
+      res = await fetch(`${API_BASE}/courses/extract-syllabus`, {
+        method: 'POST',
+        headers,
+        body,
+      });
+    }
+  }
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Failed to extract syllabus' }));
+    throw new Error(err.detail || err.message || 'Failed to extract syllabus document');
+  }
+
+  return await res.json();
+}
+
+export async function createCourseFromSyllabus(
+  course: SyllabusExtractedCourse,
+  resourceId?: string,
+  term?: string,
+  tokenOverride?: string | null,
+): Promise<{
+  success: boolean;
+  course: Course;
+  moduleCount: number;
+  topicCount: number;
+  assessmentCount: number;
+}> {
+  // Always obtain fresh token at request time if not explicitly provided
+  const token = tokenOverride || (await getClerkSessionToken(true));
+  let headers = await getAuthHeaders(token);
+
+  let res = await fetch(`${API_BASE}/courses/create-from-syllabus`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ course, resourceId, term }),
+  });
+
+  // Safe 1-time retry on confirmed 401 authentication rejection
+  if (res.status === 401) {
+    const freshToken = await getClerkSessionToken(true);
+    if (freshToken && freshToken !== token) {
+      headers = await getAuthHeaders(freshToken);
+      res = await fetch(`${API_BASE}/courses/create-from-syllabus`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ course, resourceId, term }),
+      });
+    }
+  }
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Failed to create course from syllabus' }));
+    throw new Error(err.detail || err.message || 'Failed to create course structure');
+  }
+
+  return await res.json();
+}
+
+// ==========================================
+// Learning Universe: Resource Discovery API
+// ==========================================
+
+export async function fetchTopicDiscoveredResources(
+  courseId: string,
+  topicId: string,
+): Promise<
+  Array<{
+    id?: string;
+    title: string;
+    provider: string;
+    url: string | null;
+    type: TopicResourceType;
+    verificationStatus: TopicResourceVerificationStatus;
+    relevanceNote: string;
+  }>
+> {
+  const headers = await getAuthHeaders();
+  const res = await fetch(`${API_BASE}/courses/${courseId}/topics/${topicId}/resources/discover`, {
+    headers,
+    cache: 'no-store',
+  });
+
+  if (!res.ok) {
+    return [];
+  }
+
+  return await res.json();
+}
+
+export async function attachTopicResource(
+  courseId: string,
+  topicId: string,
+  resource: {
+    title: string;
+    provider?: string | null;
+    url?: string | null;
+    type: TopicResourceType;
+    verificationStatus: TopicResourceVerificationStatus;
+    relevanceNote?: string | null;
+  },
+): Promise<TopicResource> {
+  const headers = await getAuthHeaders();
+  const res = await fetch(`${API_BASE}/courses/${courseId}/topics/${topicId}/resources`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(resource),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Failed to attach topic resource' }));
+    throw new Error(err.detail || 'Failed to attach topic resource');
+  }
+
+  return await res.json();
+}
+
+export async function deleteTopicResource(
+  courseId: string,
+  topicId: string,
+  resourceId: string,
+): Promise<void> {
+  const headers = await getAuthHeaders();
+  const res = await fetch(
+    `${API_BASE}/courses/${courseId}/topics/${topicId}/resources/${resourceId}`,
+    {
+      method: 'DELETE',
+      headers,
+    },
+  );
+
+  if (!res.ok) {
+    throw new Error('Failed to delete topic resource');
+  }
+}
+
+// ==========================================
+// Learning Universe: Personalized Study Planner API
+// ==========================================
+
+export async function fetchCourseStudyPlan(
+  courseId: string,
+): Promise<{ plan: StudyPlan | null; sessions: StudySession[] }> {
+  try {
+    const headers = await getAuthHeaders();
+    const res = await fetch(`${API_BASE}/courses/${courseId}/plan`, {
+      headers,
+      cache: 'no-store',
+    });
+
+    if (!res.ok) return { plan: null, sessions: [] };
+    return await res.json();
+  } catch {
+    return { plan: null, sessions: [] };
+  }
+}
+
+export async function generateCourseStudyPlan(
+  courseId: string,
+  params: {
+    targetExamDate: string;
+    availableHoursPerWeek?: number;
+    dailyTargetMinutes?: number;
+    preferredDays?: number[];
+  },
+): Promise<{ plan: StudyPlan; sessions: StudySession[]; workloadWarning?: PlanWorkloadWarning }> {
+  const headers = await getAuthHeaders();
+  const res = await fetch(`${API_BASE}/courses/${courseId}/plan/generate`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(params),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Failed to generate study plan' }));
+    throw new Error(err.detail || err.message || 'Failed to generate study plan');
+  }
+
+  return await res.json();
+}
+
+export async function updatePlanSession(
+  courseId: string,
+  sessionId: string,
+  updates: {
+    status?: 'scheduled' | 'completed' | 'missed' | 'rescheduled';
+    scheduledDate?: string;
+    durationMinutes?: number;
+    notes?: string;
+  },
+): Promise<StudySession> {
+  const headers = await getAuthHeaders();
+  const res = await fetch(`${API_BASE}/courses/${courseId}/plan/sessions/${sessionId}`, {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify(updates),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Failed to update study session' }));
+    throw new Error(err.detail || err.message || 'Failed to update study session');
+  }
+
+  return await res.json();
+}
+
+export async function recoverCourseStudyPlan(
+  courseId: string,
+): Promise<{ success: boolean; recoveredCount: number; sessions: StudySession[] }> {
+  const headers = await getAuthHeaders();
+  const res = await fetch(`${API_BASE}/courses/${courseId}/plan/recover`, {
+    method: 'POST',
+    headers,
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Failed to recover study plan' }));
+    throw new Error(err.detail || err.message || 'Failed to recover study plan');
+  }
+
+  return await res.json();
+}
+
+export async function fetchPlannerOverview(): Promise<{
+  plans: StudyPlan[];
+  sessions: StudySession[];
+}> {
+  try {
+    const headers = await getAuthHeaders();
+    const res = await fetch(`${API_BASE}/courses/planner-overview`, {
+      headers,
+      cache: 'no-store',
+    });
+
+    if (!res.ok) return { plans: [], sessions: [] };
+    return await res.json();
+  } catch {
+    return { plans: [], sessions: [] };
+  }
+}
+
+// ==========================================
+// Phase 2: Examination Intelligence & Practice
+// ==========================================
+
+export async function uploadExaminationPaper(
+  courseId: string,
+  formData: FormData,
+): Promise<{ paper: ExaminationPaper; questions: ExaminationQuestion[] }> {
+  const headers = await getAuthHeaders(undefined, false);
+
+  const res = await fetch(`${API_BASE}/examination/courses/${courseId}/papers/upload`, {
+    method: 'POST',
+    headers,
+    body: formData,
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Failed to upload examination paper' }));
+    throw new Error(err.detail || err.message || 'Failed to upload examination paper');
+  }
+
+  return await res.json();
+}
+
+export async function fetchCourseExaminationPapers(courseId: string): Promise<ExaminationPaper[]> {
+  const headers = await getAuthHeaders();
+  const res = await fetch(`${API_BASE}/examination/courses/${courseId}/papers`, {
+    headers,
+    cache: 'no-store',
+  });
+
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.papers || [];
+}
+
+export async function fetchExaminationPaper(
+  paperId: string,
+): Promise<{ paper: ExaminationPaper; questions: ExaminationQuestion[] }> {
+  const headers = await getAuthHeaders();
+  const res = await fetch(`${API_BASE}/examination/papers/${paperId}`, {
+    headers,
+    cache: 'no-store',
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Failed to fetch paper' }));
+    throw new Error(err.detail || err.message || 'Failed to fetch paper');
+  }
+
+  return await res.json();
+}
+
+export async function updateExaminationQuestion(
+  questionId: string,
+  updates: Partial<ExaminationQuestion>,
+): Promise<ExaminationQuestion> {
+  const headers = await getAuthHeaders();
+  const res = await fetch(`${API_BASE}/examination/questions/${questionId}`, {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify(updates),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Failed to update question' }));
+    throw new Error(err.detail || err.message || 'Failed to update question');
+  }
+
+  return await res.json();
+}
+
+export async function fetchCourseExaminationAnalysis(courseId: string): Promise<{
+  courseId: string;
+  paperCount: number;
+  questionCount: number;
+  paperAnalyses: ExamPaperStructuralAnalysis[];
+  topicAnalysis: ExamTopicAnalysis[];
+  crossPaperReport: CrossPaperComparisonReport | null;
+}> {
+  const headers = await getAuthHeaders();
+  const res = await fetch(`${API_BASE}/examination/courses/${courseId}/analysis`, {
+    headers,
+    cache: 'no-store',
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Failed to fetch examination analysis' }));
+    throw new Error(err.detail || err.message || 'Failed to fetch examination analysis');
+  }
+
+  return await res.json();
+}
+
+export async function generatePracticeAssessment(
+  courseId: string,
+  options: {
+    format?: string;
+    blueprintId?: string;
+    difficulty?: string;
+    focusTopicIds?: string[];
+  } = {},
+): Promise<{ assessment: PracticeAssessment; questions: PracticeQuestion[] }> {
+  const headers = await getAuthHeaders();
+  const res = await fetch(`${API_BASE}/examination/courses/${courseId}/practice/generate`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(options),
+  });
+
+  if (!res.ok) {
+    const err = await res
+      .json()
+      .catch(() => ({ detail: 'Failed to generate practice assessment' }));
+    throw new Error(err.detail || err.message || 'Failed to generate practice assessment');
+  }
+
+  return await res.json();
+}
+
+export async function fetchPracticeAssessment(
+  assessmentId: string,
+  showSolutions = false,
+): Promise<{ assessment: PracticeAssessment; questions: PracticeQuestion[] }> {
+  const headers = await getAuthHeaders();
+  const url = `${API_BASE}/examination/practice/${assessmentId}${showSolutions ? '?showSolutions=true' : ''}`;
+  const res = await fetch(url, {
+    headers,
+    cache: 'no-store',
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Failed to fetch practice assessment' }));
+    throw new Error(err.detail || err.message || 'Failed to fetch practice assessment');
+  }
+
+  return await res.json();
+}
+
+export async function submitPracticeAssessment(
+  assessmentId: string,
+  answers: Array<{ questionId: string; studentAnswer: string }>,
+): Promise<{
+  submission: PracticeSubmission;
+  feedback: QuestionDiagnosticFeedback[];
+  report: PracticeDiagnosticReport;
+}> {
+  const headers = await getAuthHeaders();
+  const res = await fetch(`${API_BASE}/examination/practice/${assessmentId}/submit`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ answers }),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Failed to submit practice assessment' }));
+    throw new Error(err.detail || err.message || 'Failed to submit practice assessment');
+  }
+
+  return await res.json();
+}
+
+export async function fetchAiQuotaStatus(): Promise<AiUsageQuotaStatus> {
+  const headers = await getAuthHeaders();
+  const res = await fetch(`${API_BASE}/examination/ai/quota`, {
+    headers,
+    cache: 'no-store',
+  });
+
+  if (!res.ok) {
+    return {
+      userId: 'anonymous',
+      tier: 'free',
+      requestsInWindow: 0,
+      windowLimit: 20,
+      windowResetAt: new Date(),
+      dailyTokensUsed: 0,
+      dailyTokenLimit: 100_000,
+      monthlyTokensUsed: 0,
+      monthlyTokenLimit: 2_000_000,
+      currentConcurrency: 0,
+      concurrencyLimit: 2,
+      isThrottled: false,
+    };
+  }
+
+  return await res.json();
 }

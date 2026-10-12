@@ -2,8 +2,22 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { getSession } from '../../middleware/auth.js';
 import { defaultStore } from '../../data/store.js';
-import { AppError } from '@campusflow/shared';
+import {
+  AppError,
+  validateFileBytes,
+  extractDocumentText,
+  extractRawText,
+  parseSyllabusDocument,
+  syllabusExtractedCourseSchema,
+  normalizeFileName,
+  createLogger,
+} from '@campusflow/shared';
 import type { AcademicNode } from '@campusflow/types';
+import { sharedStorage } from '../resources/index.js';
+import { generateStudySchedule, recoverMissedSessions } from './study-planner.js';
+import { discoverTopicResources } from './resource-discovery.js';
+
+const logger = createLogger({ module: 'courses' });
 
 export const coursesRouter = new Hono();
 
@@ -19,11 +33,329 @@ coursesRouter.get('/', async (c) => {
   return c.json(courses);
 });
 
+// GET /api/v1/courses/planner-overview
+coursesRouter.get('/planner-overview', async (c) => {
+  const session = getSession(c);
+  const plans = await defaultStore.listStudyPlans(session.userId);
+  const allSessions = [];
+  for (const plan of plans) {
+    const sessions = await defaultStore.listStudySessions(plan.id, session.userId);
+    allSessions.push(...sessions);
+  }
+  return c.json({ plans, sessions: allSessions });
+});
+
+// POST /api/v1/courses/extract-syllabus
+coursesRouter.post('/extract-syllabus', async (c) => {
+  const session = getSession(c);
+  const contentType = c.req.header('content-type') || '';
+
+  // 1. Multipart PDF upload
+  if (contentType.includes('multipart/form-data')) {
+    const formData = await c.req.parseBody().catch(() => null);
+    if (!formData || !formData['file']) {
+      throw AppError.badRequest('File is required in multipart upload.');
+    }
+
+    const file = formData['file'];
+    if (
+      !file ||
+      typeof file === 'string' ||
+      typeof (file as { arrayBuffer?: () => Promise<ArrayBuffer> }).arrayBuffer !== 'function'
+    ) {
+      throw AppError.badRequest('Invalid file upload.');
+    }
+
+    const fileObj = file as File;
+    const fileName = normalizeFileName(fileObj.name || 'syllabus.pdf');
+    const arrayBuffer = await fileObj.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+
+    const validated = validateFileBytes(buffer, fileName);
+    if (!validated.isValid) {
+      throw AppError.badRequest(validated.error || 'Invalid file format.');
+    }
+
+    const extraction = await extractDocumentText(buffer, validated.detectedMimeType);
+
+    const warnings: string[] = [];
+    if (!extraction.hasExtractableText) {
+      warnings.push(
+        'Scanned or image-only document detected with no selectable text. Optical Character Recognition (OCR) is required for scanned documents. Default values were provided; please review carefully.',
+      );
+    }
+
+    const parsedSyllabus = parseSyllabusDocument(extraction);
+
+    // Save uploaded syllabus to user's library as a persistent resource
+    const objectKey = `users/${session.userId}/resources/${Date.now()}_${encodeURIComponent(fileName)}`;
+    try {
+      await sharedStorage.upload(objectKey, buffer, validated.detectedMimeType);
+    } catch (storageErr) {
+      logger.warn('Failed to upload syllabus to object storage, proceeding with extraction', {
+        error: storageErr instanceof Error ? storageErr.message : String(storageErr),
+      });
+    }
+
+    let resourceId: string | undefined;
+    try {
+      const resource = await defaultStore.createResource({
+        userId: session.userId,
+        courseId: null,
+        title: parsedSyllabus.title || fileName,
+        type: 'syllabus',
+        objectKey,
+        mimeType: validated.detectedMimeType,
+        sizeBytes: validated.sizeBytes,
+        contentHash: validated.contentHash,
+        pageCount: extraction.pageCount,
+        processingStatus: 'ready',
+      });
+      resourceId = resource.id;
+    } catch (storeErr) {
+      logger.warn('Failed to create resource entry, continuing with course extraction', {
+        error: storeErr instanceof Error ? storeErr.message : String(storeErr),
+      });
+    }
+
+    return c.json({
+      extractedCourse: parsedSyllabus,
+      resourceId,
+      warnings,
+    });
+  }
+
+  // 2. JSON Payload (either resourceId or raw text)
+  const body = await c.req.json().catch(() => null);
+  if (!body) {
+    throw AppError.badRequest('Expected multipart form-data or JSON payload.');
+  }
+
+  if (body.resourceId) {
+    const resource = await defaultStore.getResource(body.resourceId, session.userId);
+    const storageObj = await sharedStorage.getObject(resource.objectKey);
+    if (!storageObj) {
+      throw AppError.notFound('Resource file not found in storage.');
+    }
+    const extraction = await extractDocumentText(storageObj.data, resource.mimeType);
+    const parsedSyllabus = parseSyllabusDocument(extraction);
+    return c.json({
+      extractedCourse: parsedSyllabus,
+      resourceId: resource.id,
+      warnings: extraction.hasExtractableText ? [] : ['Limited text extracted from document.'],
+    });
+  }
+
+  if (body.text) {
+    const buffer = Buffer.from(body.text, 'utf8');
+    const extraction = extractRawText(buffer, 'text/plain');
+    const parsedSyllabus = parseSyllabusDocument(extraction);
+    return c.json({
+      extractedCourse: parsedSyllabus,
+      warnings: [],
+    });
+  }
+
+  throw AppError.badRequest('Either file upload, resourceId, or text is required.');
+});
+
+// POST /api/v1/courses/create-from-syllabus
+coursesRouter.post('/create-from-syllabus', async (c) => {
+  const session = getSession(c);
+  const body = await c.req.json().catch(() => null);
+
+  const payloadSchema = z.object({
+    course: syllabusExtractedCourseSchema,
+    resourceId: z.string().uuid().optional().nullable(),
+    term: z.string().optional().nullable(),
+  });
+
+  const parsed = payloadSchema.safeParse(body);
+  if (!parsed.success) {
+    throw AppError.badRequest('Invalid course structure payload', parsed.error.format());
+  }
+
+  const { course: courseData, resourceId, term } = parsed.data;
+
+  // Duplicate course prevention
+  const existingCourses = await defaultStore.listCourses(session.userId);
+  const duplicate = existingCourses.find(
+    (existing) =>
+      existing.code.toLowerCase().trim() === courseData.code.toLowerCase().trim() &&
+      existing.term === (term || courseData.term || 'Fall 2026'),
+  );
+
+  if (duplicate) {
+    throw new AppError(
+      'CONFLICT',
+      `Course with code "${courseData.code}" already exists for ${term || courseData.term || 'Fall 2026'}.`,
+      409,
+    );
+  }
+
+  // 1. Create Course Record
+  const course = await defaultStore.createCourse({
+    userId: session.userId,
+    code: courseData.code,
+    title: courseData.title,
+    term: term || courseData.term || 'Fall 2026',
+  });
+
+  // 2. Link Resource if provided
+  if (resourceId) {
+    try {
+      await defaultStore.updateResource(resourceId, session.userId, { courseId: course.id });
+    } catch {
+      // Ignore if resource cannot be updated
+    }
+  }
+
+  // 3. Create Modules & Topics hierarchy
+  let totalModules = 0;
+  let totalTopics = 0;
+  let firstTopicId: string | null = null;
+
+  for (const mod of courseData.modules) {
+    const modRows = await defaultStore.createAcademicNodes([
+      {
+        courseId: course.id,
+        userId: session.userId,
+        parentId: null,
+        type: 'module',
+        title: mod.title,
+        description: mod.description || null,
+        orderIndex: mod.orderIndex,
+        origin: 'user',
+        confidence: 1.0,
+        needsReview: 'no',
+        learningObjectives: mod.learningObjectives,
+        estimatedMinutes: (mod.teachingHours || 0) * 60,
+      },
+    ]);
+    const moduleNode = modRows[0];
+    if (!moduleNode) continue;
+    totalModules++;
+
+    for (const topic of mod.topics) {
+      const topicRows = await defaultStore.createAcademicNodes([
+        {
+          courseId: course.id,
+          userId: session.userId,
+          parentId: moduleNode.id,
+          type: 'topic',
+          title: topic.title,
+          description:
+            topic.description || (topic.subtopics?.length ? topic.subtopics.join(', ') : null),
+          orderIndex: topic.orderIndex,
+          origin: 'user',
+          confidence: 1.0,
+          needsReview: 'no',
+          estimatedMinutes: topic.estimatedMinutes || 60,
+          prerequisites: topic.prerequisites || [],
+          notes: topic.pageReferences ? `Source: ${topic.pageReferences}` : null,
+        },
+      ]);
+      const topicNode = topicRows[0];
+      if (!topicNode) continue;
+      totalTopics++;
+      if (!firstTopicId) firstTopicId = topicNode.id;
+
+      // Link page references to resource if available
+      if (resourceId && topic.pageReferences) {
+        const pageMatch = /(\d+)(?:[–-](\d+))?/.exec(topic.pageReferences);
+        const pageStart = pageMatch && pageMatch[1] ? parseInt(pageMatch[1], 10) : null;
+        const pageEnd = pageMatch && pageMatch[2] ? parseInt(pageMatch[2], 10) : pageStart;
+
+        try {
+          await defaultStore.linkResourceToAcademicNode({
+            nodeId: topicNode.id,
+            resourceId,
+            userId: session.userId,
+            courseId: course.id,
+            pageStart,
+            pageEnd,
+            relevanceSummary: topic.pageReferences,
+            origin: 'user',
+          });
+        } catch {
+          // Non-fatal if link fails
+        }
+      }
+    }
+  }
+
+  // 4. Save Prescribed Textbooks into Topic Resources
+  if (firstTopicId && courseData.prescribedTextbooks?.length) {
+    for (const book of courseData.prescribedTextbooks) {
+      try {
+        await defaultStore.createTopicResource({
+          topicId: firstTopicId,
+          courseId: course.id,
+          userId: session.userId,
+          title: book.title,
+          provider: book.author || 'Prescribed Syllabus',
+          url: null,
+          type: 'textbook',
+          verificationStatus: 'syllabus_extracted',
+          relevanceNote: book.edition
+            ? `Edition: ${book.edition}${book.isPrimary ? ' (Primary)' : ''}`
+            : book.isPrimary
+              ? 'Primary textbook'
+              : 'Reference book',
+        });
+      } catch {
+        // Non-fatal
+      }
+    }
+  }
+
+  // 5. Create Assessments
+  let totalAssessments = 0;
+  if (courseData.assessments?.length) {
+    for (const a of courseData.assessments) {
+      try {
+        await defaultStore.createAssessment({
+          userId: session.userId,
+          courseId: course.id,
+          title: a.title,
+          type: a.type,
+          date: a.date ? new Date(a.date) : null,
+          totalMarks: a.totalMarks ?? 50,
+          weightage: a.weightage ?? null,
+          status: 'upcoming',
+        });
+        totalAssessments++;
+      } catch {
+        // Non-fatal
+      }
+    }
+  }
+
+  return c.json(
+    {
+      success: true,
+      course,
+      moduleCount: totalModules,
+      topicCount: totalTopics,
+      assessmentCount: totalAssessments,
+    },
+    201,
+  );
+});
+
 coursesRouter.get('/:id', async (c) => {
   const session = getSession(c);
   const id = c.req.param('id');
-  const course = await defaultStore.getCourse(id, session.userId);
-  return c.json(course);
+  try {
+    const course = await defaultStore.getCourse(id, session.userId);
+    return c.json(course);
+  } catch (err: unknown) {
+    if (err instanceof AppError) throw err;
+    if (err instanceof Error && err.message.toLowerCase().includes('not found')) {
+      throw AppError.notFound('Course not found.');
+    }
+    throw err;
+  }
 });
 
 coursesRouter.post('/', async (c) => {
@@ -464,4 +796,262 @@ coursesRouter.post('/:id/topics/:topicId/study-events', async (c) => {
   );
 
   return c.json(result, 201);
+});
+
+// ==========================================
+// Topic Resources Endpoints
+// ==========================================
+
+const topicResourceSchema = z.object({
+  title: z.string().min(1).max(255),
+  provider: z.string().max(100).optional().nullable(),
+  url: z.string().url().optional().nullable(),
+  type: z.enum(['textbook', 'lecture', 'article', 'video', 'practice']).default('textbook'),
+  verificationStatus: z
+    .enum(['syllabus_extracted', 'verified_external', 'recommended_unverified', 'student_uploaded'])
+    .default('recommended_unverified'),
+  relevanceNote: z.string().max(1000).optional().nullable(),
+});
+
+// GET /api/v1/courses/:id/topics/:topicId/resources
+coursesRouter.get('/:id/topics/:topicId/resources', async (c) => {
+  const session = getSession(c);
+  const id = c.req.param('id');
+  const topicId = c.req.param('topicId');
+  await defaultStore.getCourse(id, session.userId);
+
+  const resources = await defaultStore.listTopicResources(topicId, session.userId);
+  return c.json(resources);
+});
+
+// POST /api/v1/courses/:id/topics/:topicId/resources
+coursesRouter.post('/:id/topics/:topicId/resources', async (c) => {
+  const session = getSession(c);
+  const id = c.req.param('id');
+  const topicId = c.req.param('topicId');
+  await defaultStore.getCourse(id, session.userId);
+
+  const body = await c.req.json().catch(() => null);
+  const parsed = topicResourceSchema.safeParse(body);
+  if (!parsed.success) {
+    throw AppError.badRequest('Invalid topic resource payload', parsed.error.format());
+  }
+
+  const created = await defaultStore.createTopicResource({
+    topicId,
+    courseId: id,
+    userId: session.userId,
+    title: parsed.data.title,
+    provider: parsed.data.provider ?? null,
+    url: parsed.data.url ?? null,
+    type: parsed.data.type,
+    verificationStatus: parsed.data.verificationStatus,
+    relevanceNote: parsed.data.relevanceNote ?? null,
+  });
+
+  return c.json(created, 201);
+});
+
+// DELETE /api/v1/courses/:id/topics/:topicId/resources/:resourceId
+coursesRouter.delete('/:id/topics/:topicId/resources/:resourceId', async (c) => {
+  const session = getSession(c);
+  const id = c.req.param('id');
+  const resourceId = c.req.param('resourceId');
+  await defaultStore.getCourse(id, session.userId);
+
+  await defaultStore.deleteTopicResource(resourceId, session.userId);
+  return c.json({ success: true, message: 'Resource removed.' });
+});
+
+// GET /api/v1/courses/:id/topics/:topicId/resources/discover
+coursesRouter.get('/:id/topics/:topicId/resources/discover', async (c) => {
+  const session = getSession(c);
+  const id = c.req.param('id');
+  const topicId = c.req.param('topicId');
+  await defaultStore.getCourse(id, session.userId);
+
+  // Fetch topic node
+  const nodes = await defaultStore.listAcademicNodes(id, session.userId);
+  const topic = nodes.find((n) => n.id === topicId);
+  if (!topic) {
+    throw AppError.notFound('Topic node not found.');
+  }
+
+  const discovered = await discoverTopicResources(defaultStore, topic, session.userId, id);
+  return c.json(discovered);
+});
+
+// ==========================================
+// Personalized Study Planner Endpoints
+// ==========================================
+
+const generatePlanSchema = z.object({
+  targetExamDate: z.string().datetime(),
+  availableHoursPerWeek: z.number().min(1).max(80).default(10),
+  dailyTargetMinutes: z.number().int().min(15).max(360).default(60),
+  preferredDays: z.array(z.number().int().min(0).max(6)).default([1, 2, 3, 4, 5, 6]),
+});
+
+const updateSessionSchema = z.object({
+  status: z.enum(['scheduled', 'completed', 'missed', 'rescheduled']).optional(),
+  scheduledDate: z.string().datetime().optional(),
+  durationMinutes: z.number().int().min(10).max(480).optional(),
+  notes: z.string().max(2000).optional().nullable(),
+});
+
+// GET /api/v1/courses/:id/plan
+coursesRouter.get('/:id/plan', async (c) => {
+  const session = getSession(c);
+  const id = c.req.param('id');
+  await defaultStore.getCourse(id, session.userId);
+
+  const plans = await defaultStore.listStudyPlans(session.userId, id);
+  const activePlan = plans.find((p) => p.status === 'active') || plans[0] || null;
+
+  if (!activePlan) {
+    return c.json({ plan: null, sessions: [] });
+  }
+
+  const sessions = await defaultStore.listStudySessions(activePlan.id, session.userId);
+  return c.json({ plan: activePlan, sessions });
+});
+
+// POST /api/v1/courses/:id/plan/generate
+coursesRouter.post('/:id/plan/generate', async (c) => {
+  const session = getSession(c);
+  const id = c.req.param('id');
+  const course = await defaultStore.getCourse(id, session.userId);
+
+  const body = await c.req.json().catch(() => null);
+  const parsed = generatePlanSchema.safeParse(body);
+  if (!parsed.success) {
+    throw AppError.badRequest('Invalid study plan generation parameters', parsed.error.format());
+  }
+
+  const nodes = await defaultStore.listAcademicNodes(id, session.userId);
+  const topics = nodes.filter((n) => n.type === 'topic');
+
+  if (topics.length === 0) {
+    throw AppError.badRequest('Course has no topics to plan study sessions for.');
+  }
+
+  // Deactivate any existing active plans for this course
+  const existingPlans = await defaultStore.listStudyPlans(session.userId, id);
+  for (const p of existingPlans) {
+    if (p.status === 'active') {
+      await defaultStore.updateStudyPlan(p.id, session.userId, { status: 'archived' });
+    }
+  }
+
+  // Create new active Study Plan
+  const plan = await defaultStore.createStudyPlan({
+    userId: session.userId,
+    courseId: id,
+    title: `${course.code} Exam Master Plan`,
+    targetExamDate: new Date(parsed.data.targetExamDate),
+    availableHoursPerWeek: parsed.data.availableHoursPerWeek,
+    dailyTargetMinutes: parsed.data.dailyTargetMinutes,
+    status: 'active',
+  });
+
+  // Generate scheduled sessions & workload analysis
+  const { sessions: generatedSessions, workloadWarning } = generateStudySchedule({
+    courseId: id,
+    userId: session.userId,
+    planId: plan.id,
+    courseTitle: course.title,
+    targetExamDate: new Date(parsed.data.targetExamDate),
+    availableHoursPerWeek: parsed.data.availableHoursPerWeek,
+    dailyTargetMinutes: parsed.data.dailyTargetMinutes,
+    preferredDays: parsed.data.preferredDays,
+    topics,
+  });
+
+  const createdSessions = await defaultStore.createStudySessions(generatedSessions);
+
+  return c.json(
+    {
+      plan,
+      sessions: createdSessions,
+      workloadWarning,
+    },
+    201,
+  );
+});
+
+// PUT /api/v1/courses/:id/plan/sessions/:sessionId
+coursesRouter.put('/:id/plan/sessions/:sessionId', async (c) => {
+  const session = getSession(c);
+  const id = c.req.param('id');
+  const sessionId = c.req.param('sessionId');
+  await defaultStore.getCourse(id, session.userId);
+
+  const body = await c.req.json().catch(() => null);
+  const parsed = updateSessionSchema.safeParse(body);
+  if (!parsed.success) {
+    throw AppError.badRequest('Invalid session update payload', parsed.error.format());
+  }
+
+  const updates: Record<string, unknown> = {};
+  if (parsed.data.status !== undefined) {
+    updates['status'] = parsed.data.status;
+    if (parsed.data.status === 'completed') {
+      updates['completedAt'] = new Date();
+    }
+  }
+  if (parsed.data.scheduledDate !== undefined) {
+    updates['scheduledDate'] = new Date(parsed.data.scheduledDate);
+  }
+  if (parsed.data.durationMinutes !== undefined) {
+    updates['durationMinutes'] = parsed.data.durationMinutes;
+  }
+  if (parsed.data.notes !== undefined) {
+    updates['notes'] = parsed.data.notes;
+  }
+
+  const updated = await defaultStore.updateStudySession(sessionId, session.userId, updates);
+  return c.json(updated);
+});
+
+// POST /api/v1/courses/:id/plan/recover
+coursesRouter.post('/:id/plan/recover', async (c) => {
+  const session = getSession(c);
+  const id = c.req.param('id');
+  await defaultStore.getCourse(id, session.userId);
+
+  const plans = await defaultStore.listStudyPlans(session.userId, id);
+  const activePlan = plans.find((p) => p.status === 'active');
+  if (!activePlan || !activePlan.targetExamDate) {
+    throw AppError.badRequest('No active plan with an exam date found for recovery.');
+  }
+
+  const sessions = await defaultStore.listStudySessions(activePlan.id, session.userId);
+  const recovered = recoverMissedSessions(
+    sessions,
+    activePlan.targetExamDate,
+    activePlan.dailyTargetMinutes ?? 60,
+  );
+
+  // Update modified sessions
+  let recoveredCount = 0;
+  for (const s of recovered) {
+    const original = sessions.find((orig) => orig.id === s.id);
+    if (
+      original &&
+      new Date(original.scheduledDate).getTime() !== new Date(s.scheduledDate).getTime()
+    ) {
+      await defaultStore.updateStudySession(s.id, session.userId, {
+        scheduledDate: s.scheduledDate,
+        notes: s.notes,
+      });
+      recoveredCount++;
+    }
+  }
+
+  const freshSessions = await defaultStore.listStudySessions(activePlan.id, session.userId);
+  return c.json({
+    success: true,
+    recoveredCount,
+    sessions: freshSessions,
+  });
 });

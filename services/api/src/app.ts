@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { cors } from 'hono/cors';
 import { requestIdMiddleware } from './middleware/requestId.js';
 import { loggingMiddleware } from './middleware/logging.js';
 import { errorHandler } from './middleware/errorHandler.js';
@@ -21,13 +22,40 @@ import { opportunitiesRouter } from './modules/opportunities/index.js';
 import { careerRouter } from './modules/career/index.js';
 import { applicationsRouter } from './modules/applications/index.js';
 import { todayRouter } from './modules/today/index.js';
+import { examinationRouter } from './modules/examination/index.js';
 
 export function createApiApp() {
   const app = new Hono();
 
-  // 1. Global Pre-Routing Middleware
+  // 1. Global Pre-Routing Middleware & CORS
   app.use('*', requestIdMiddleware);
   app.use('*', loggingMiddleware);
+  app.use(
+    '*',
+    cors({
+      origin: (origin) => {
+        const configuredOrigin = process.env['WEB_ORIGIN'] || 'http://localhost:3000';
+        if (!origin || origin === configuredOrigin || configuredOrigin === '*') {
+          return origin || configuredOrigin;
+        }
+        if (process.env['NODE_ENV'] !== 'production' && origin.startsWith('http://localhost:')) {
+          return origin;
+        }
+        return configuredOrigin;
+      },
+      allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+      allowHeaders: [
+        'Content-Type',
+        'Authorization',
+        'x-test-user-id',
+        'x-test-user-role',
+        'x-request-id',
+      ],
+      exposeHeaders: ['x-request-id'],
+      credentials: true,
+      maxAge: 86400,
+    }),
+  );
   app.onError(errorHandler);
 
   // 2. Health & Diagnostic Check (unauthenticated, safe diagnostics)
@@ -52,6 +80,7 @@ export function createApiApp() {
   api.route('/career', careerRouter);
   api.route('/applications', applicationsRouter);
   api.route('/today', todayRouter);
+  api.route('/examination', examinationRouter);
 
   app.route('/api/v1', api);
 

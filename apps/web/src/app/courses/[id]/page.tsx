@@ -10,6 +10,10 @@ import {
   ExternalLink,
   AlertCircle,
   RefreshCw,
+  Network,
+  Calendar,
+  BrainCircuit,
+  Layers,
 } from 'lucide-react';
 import {
   fetchCourse,
@@ -20,7 +24,11 @@ import {
 } from '@/lib/api';
 import { UploadDropzone } from '@/components/UploadDropzone';
 import { AcademicMapTree } from '@/components/AcademicMapTree';
+import { InteractiveKnowledgeMap } from '@/components/InteractiveKnowledgeMap';
+import { TopicWorkspaceDrawer } from '@/components/TopicWorkspaceDrawer';
+import { CourseStudyPlanner } from '@/components/CourseStudyPlanner';
 import { AssessmentManager } from '@/components/AssessmentManager';
+import { ExaminationIntelligenceView } from '@/components/ExaminationIntelligenceView';
 import { StatusBadge } from '@/components/StatusBadge';
 import type {
   Course,
@@ -40,6 +48,15 @@ export default function CourseDetailPage({ params }: { params: Promise<{ id: str
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  // Active tab state
+  const [activeTab, setActiveTab] = useState<'overview' | 'map' | 'planner' | 'examination'>(
+    'overview',
+  );
+
+  // Topic Workspace Drawer
+  const [selectedTopic, setSelectedTopic] = useState<AcademicNodeWithResources | null>(null);
+  const [isDrawerOpen, setIsDrawerOpen] = useState(false);
 
   const loadData = async () => {
     try {
@@ -67,6 +84,19 @@ export default function CourseDetailPage({ params }: { params: Promise<{ id: str
   useEffect(() => {
     loadData();
   }, [courseId]);
+
+  const handleSelectTopic = (topic: AcademicNodeWithResources) => {
+    setSelectedTopic(topic);
+    setIsDrawerOpen(true);
+  };
+
+  const handleSelectTopicById = (topicId: string) => {
+    const found = academicNodes.find((n) => n.id === topicId);
+    if (found) {
+      setSelectedTopic(found);
+      setIsDrawerOpen(true);
+    }
+  };
 
   const handleDeleteResource = async (resourceId: string, title: string) => {
     if (
@@ -116,8 +146,11 @@ export default function CourseDetailPage({ params }: { params: Promise<{ id: str
     );
   }
 
+  const topicCount = academicNodes.filter((n) => n.type === 'topic').length;
+  const moduleCount = academicNodes.filter((n) => n.type === 'module').length;
+
   return (
-    <div className="space-y-8">
+    <div className="space-y-6">
       {/* Back button & Course Heading */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 pb-6 border-b border-[var(--cf-border)]">
         <div>
@@ -135,11 +168,11 @@ export default function CourseDetailPage({ params }: { params: Promise<{ id: str
             <h1 className="text-2xl font-semibold tracking-tight text-white">{course.title}</h1>
           </div>
           <p className="text-xs text-[var(--cf-text-secondary)] mt-1 font-mono">
-            {course.term || 'Fall 2026'} · Syllabus Status: {course.syllabusStatus}
+            {course.term || 'Fall 2026'} · {moduleCount} Modules · {topicCount} Topics
           </p>
         </div>
 
-        {/* Action button: Search in Course */}
+        {/* Action button: Search in Course & Refresh */}
         <div className="flex items-center gap-2">
           <button
             onClick={() => loadData()}
@@ -153,121 +186,236 @@ export default function CourseDetailPage({ params }: { params: Promise<{ id: str
             className="inline-flex items-center space-x-1.5 px-3 py-2 rounded-lg bg-[var(--cf-bg-surface-2)] hover:bg-[var(--cf-border)] border border-[var(--cf-border)] text-xs text-white transition-colors"
           >
             <Search className="w-3.5 h-3.5 text-[var(--cf-primary)]" />
-            <span>Search in {course.code}</span>
+            <span>Search Library</span>
           </Link>
         </div>
       </div>
 
       {error && (
-        <div className="p-3 rounded-lg bg-rose-950/40 border border-rose-800/40 text-rose-300 text-xs flex items-center gap-2 font-mono">
+        <div className="p-3.5 rounded-lg bg-rose-950/40 border border-rose-800/40 text-rose-300 text-xs flex items-center gap-2 font-mono">
           <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
           <span>{error}</span>
         </div>
       )}
 
-      {/* Two Column Layout: Left (Upload & Resources) | Right (Academic Map) */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-        {/* Left Column: Resources and Upload Dropzone */}
-        <div className="lg:col-span-6 space-y-6">
-          {/* Upload Dropzone */}
-          <div>
-            <h2 className="text-xs font-semibold uppercase tracking-wider text-[var(--cf-text-secondary)] font-mono mb-3 flex items-center gap-2">
-              <FileText className="w-3.5 h-3.5 text-[var(--cf-primary)]" />
-              Ingest Document (PDF, TXT, MD)
-            </h2>
-            <UploadDropzone courseId={course.id} onUploadSuccess={loadData} />
-          </div>
+      {/* Navigation Tabs */}
+      <div className="flex items-center border-b border-[var(--cf-border)] gap-2 overflow-x-auto pb-px">
+        <button
+          onClick={() => setActiveTab('overview')}
+          className={`flex items-center space-x-2 px-4 py-2.5 text-xs font-medium border-b-2 transition-all whitespace-nowrap ${
+            activeTab === 'overview'
+              ? 'border-[var(--cf-primary)] text-white font-semibold'
+              : 'border-transparent text-[var(--cf-text-secondary)] hover:text-white'
+          }`}
+        >
+          <Layers className="w-3.5 h-3.5 text-[var(--cf-primary)]" />
+          <span>Course Workspace</span>
+        </button>
 
-          {/* Resources List */}
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <h2 className="text-xs font-semibold uppercase tracking-wider text-[var(--cf-text-secondary)] font-mono">
-                Course Resources ({resources.length})
-              </h2>
-            </div>
+        <button
+          onClick={() => setActiveTab('map')}
+          className={`flex items-center space-x-2 px-4 py-2.5 text-xs font-medium border-b-2 transition-all whitespace-nowrap ${
+            activeTab === 'map'
+              ? 'border-[var(--cf-primary)] text-white font-semibold'
+              : 'border-transparent text-[var(--cf-text-secondary)] hover:text-white'
+          }`}
+        >
+          <Network className="w-3.5 h-3.5 text-sky-400" />
+          <span>Knowledge Map ({topicCount})</span>
+        </button>
 
-            {resources.length === 0 ? (
-              <div className="p-6 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-bg-surface-1)] text-center text-xs text-[var(--cf-text-secondary)]">
-                No documents uploaded yet. Drop a PDF syllabus or lecture note above.
+        <button
+          onClick={() => setActiveTab('planner')}
+          className={`flex items-center space-x-2 px-4 py-2.5 text-xs font-medium border-b-2 transition-all whitespace-nowrap ${
+            activeTab === 'planner'
+              ? 'border-[var(--cf-primary)] text-white font-semibold'
+              : 'border-transparent text-[var(--cf-text-secondary)] hover:text-white'
+          }`}
+        >
+          <Calendar className="w-3.5 h-3.5 text-amber-400" />
+          <span>Personalized Study Plan</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('examination')}
+          className={`flex items-center space-x-2 px-4 py-2.5 text-xs font-medium border-b-2 transition-all whitespace-nowrap ${
+            activeTab === 'examination'
+              ? 'border-[var(--cf-primary)] text-white font-semibold'
+              : 'border-transparent text-[var(--cf-text-secondary)] hover:text-white'
+          }`}
+        >
+          <BrainCircuit className="w-3.5 h-3.5 text-emerald-400" />
+          <span>Exam Intelligence & Practice</span>
+        </button>
+      </div>
+
+      {/* TAB 1: Restored Complete Course Workspace (Two-Column Layout + Assessment Manager) */}
+      {activeTab === 'overview' && (
+        <div className="space-y-8">
+          {/* Two Column Layout: Left (Upload & Resources) | Right (Academic Map Tree) */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+            {/* Left Column: Resources and Upload Dropzone */}
+            <div className="lg:col-span-6 space-y-6">
+              {/* Upload Dropzone */}
+              <div>
+                <h2 className="text-xs font-semibold uppercase tracking-wider text-[var(--cf-text-secondary)] font-mono mb-3 flex items-center gap-2">
+                  <FileText className="w-3.5 h-3.5 text-[var(--cf-primary)]" />
+                  Ingest Document (PDF, TXT, MD)
+                </h2>
+                <UploadDropzone courseId={course.id} onUploadSuccess={loadData} />
               </div>
-            ) : (
-              <div className="divide-y divide-[var(--cf-border)] rounded-xl border border-[var(--cf-border)] bg-[var(--cf-bg-surface-1)] overflow-hidden">
-                {resources.map((res) => (
-                  <div
-                    key={res.id}
-                    className="p-4 flex items-center justify-between hover:bg-[var(--cf-bg-surface-2)]/40 transition-colors"
-                  >
-                    <div className="flex items-start space-x-3 min-w-0 pr-4">
-                      <div className="p-2 rounded-lg bg-[var(--cf-bg-surface-2)] border border-[var(--cf-border)] text-[var(--cf-primary)] shrink-0 mt-0.5">
-                        <FileText className="w-4 h-4" />
-                      </div>
-                      <div className="min-w-0">
-                        <Link
-                          href={`/resources/${res.id}`}
-                          className="text-xs font-medium text-white hover:text-[var(--cf-primary)] transition-colors truncate block"
-                        >
-                          {res.title}
-                        </Link>
-                        <div className="flex items-center gap-3 text-[11px] text-[var(--cf-text-secondary)] font-mono mt-1">
-                          <span className="uppercase">{res.type}</span>
-                          <span>·</span>
-                          <span>{res.pageCount ? `${res.pageCount} pgs` : 'Pending'}</span>
-                          <span>·</span>
-                          <span>
-                            {res.sizeBytes ? `${(res.sizeBytes / 1024).toFixed(1)} KB` : '0 KB'}
-                          </span>
+
+              {/* Resources List */}
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-xs font-semibold uppercase tracking-wider text-[var(--cf-text-secondary)] font-mono">
+                    Course Resources ({resources.length})
+                  </h2>
+                </div>
+
+                {resources.length === 0 ? (
+                  <div className="p-6 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-bg-surface-1)] text-center text-xs text-[var(--cf-text-secondary)]">
+                    No documents uploaded yet. Drop a PDF syllabus or lecture note above.
+                  </div>
+                ) : (
+                  <div className="divide-y divide-[var(--cf-border)] rounded-xl border border-[var(--cf-border)] bg-[var(--cf-bg-surface-1)] overflow-hidden">
+                    {resources.map((res) => (
+                      <div
+                        key={res.id}
+                        className="p-4 flex items-center justify-between hover:bg-[var(--cf-bg-surface-2)]/40 transition-colors"
+                      >
+                        <div className="flex items-start space-x-3 min-w-0 pr-4">
+                          <div className="p-2 rounded-lg bg-[var(--cf-bg-surface-2)] border border-[var(--cf-border)] text-[var(--cf-primary)] shrink-0 mt-0.5">
+                            <FileText className="w-4 h-4" />
+                          </div>
+                          <div className="min-w-0">
+                            <Link
+                              href={`/resources/${res.id}`}
+                              className="text-xs font-medium text-white hover:text-[var(--cf-primary)] transition-colors truncate block"
+                            >
+                              {res.title}
+                            </Link>
+                            <div className="flex items-center gap-3 text-[11px] text-[var(--cf-text-secondary)] font-mono mt-1">
+                              <span className="uppercase">{res.type}</span>
+                              <span>·</span>
+                              <span>{res.pageCount ? `${res.pageCount} pgs` : 'Pending'}</span>
+                              <span>·</span>
+                              <span>
+                                {res.sizeBytes ? `${(res.sizeBytes / 1024).toFixed(1)} KB` : '0 KB'}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center space-x-3 shrink-0">
+                          <StatusBadge status={res.processingStatus} />
+
+                          <Link
+                            href={`/resources/${res.id}`}
+                            className="p-1.5 rounded hover:bg-[var(--cf-bg-surface-2)] text-[var(--cf-text-secondary)] hover:text-white transition-colors"
+                            title="View Resource details & chunks"
+                          >
+                            <ExternalLink className="w-3.5 h-3.5" />
+                          </Link>
+
+                          <button
+                            onClick={() => handleDeleteResource(res.id, res.title)}
+                            disabled={deletingId === res.id}
+                            className="p-1.5 rounded hover:bg-rose-950/50 text-[var(--cf-text-secondary)] hover:text-rose-400 transition-colors disabled:opacity-50"
+                            title="Delete resource"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
                         </div>
                       </div>
-                    </div>
-
-                    <div className="flex items-center space-x-3 shrink-0">
-                      <StatusBadge status={res.processingStatus} />
-
-                      <Link
-                        href={`/resources/${res.id}`}
-                        className="p-1.5 rounded hover:bg-[var(--cf-bg-surface-2)] text-[var(--cf-text-secondary)] hover:text-white transition-colors"
-                        title="View Resource details & chunks"
-                      >
-                        <ExternalLink className="w-3.5 h-3.5" />
-                      </Link>
-
-                      <button
-                        onClick={() => handleDeleteResource(res.id, res.title)}
-                        disabled={deletingId === res.id}
-                        className="p-1.5 rounded hover:bg-rose-950/50 text-[var(--cf-text-secondary)] hover:text-rose-400 transition-colors disabled:opacity-50"
-                        title="Delete resource"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
+                    ))}
                   </div>
-                ))}
+                )}
               </div>
-            )}
+            </div>
+
+            {/* Right Column: Academic Map Tree */}
+            <div className="lg:col-span-6 space-y-3">
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-xs text-[var(--cf-text-secondary)] font-mono">
+                  Curriculum Structure
+                </span>
+                <button
+                  onClick={() => setActiveTab('map')}
+                  className="text-xs font-mono text-[var(--cf-primary)] hover:underline flex items-center gap-1"
+                >
+                  <Network className="w-3 h-3" />
+                  <span>Open Interactive Visual Map →</span>
+                </button>
+              </div>
+              <AcademicMapTree
+                courseId={course.id}
+                courseTitle={course.title}
+                nodes={academicNodes}
+                onNodeUpdated={loadData}
+                onSelectTopic={handleSelectTopic}
+              />
+            </div>
+          </div>
+
+          {/* Full Width Section: Assessment & Academic Topics Linkage */}
+          <div className="pt-6 border-t border-[var(--cf-border)]">
+            <AssessmentManager
+              courseId={course.id}
+              courseTitle={course.title}
+              assessments={assessments}
+              academicNodes={academicNodes}
+              onAssessmentsUpdated={loadData}
+            />
           </div>
         </div>
+      )}
 
-        {/* Right Column: Academic Map Tree */}
-        <div className="lg:col-span-6 space-y-3">
-          <AcademicMapTree
+      {/* TAB 2: Interactive Knowledge Map (Visual Canvas Graph) */}
+      {activeTab === 'map' && (
+        <div className="space-y-4">
+          <InteractiveKnowledgeMap
             courseId={course.id}
             courseTitle={course.title}
             nodes={academicNodes}
-            onNodeUpdated={loadData}
+            onSelectTopic={handleSelectTopic}
           />
         </div>
-      </div>
+      )}
 
-      {/* Full Width Section: Assessment & Academic Topics Linkage */}
-      <div className="pt-6 border-t border-[var(--cf-border)]">
-        <AssessmentManager
+      {/* TAB 3: Personalized Study Planner */}
+      {activeTab === 'planner' && (
+        <CourseStudyPlanner
           courseId={course.id}
           courseTitle={course.title}
-          assessments={assessments}
-          academicNodes={academicNodes}
-          onAssessmentsUpdated={loadData}
+          courseCode={course.code}
+          topics={academicNodes}
+          onSelectTopic={handleSelectTopicById}
         />
-      </div>
+      )}
+
+      {/* TAB 4: Examination Intelligence & Practice */}
+      {activeTab === 'examination' && (
+        <ExaminationIntelligenceView
+          courseId={course.id}
+          courseTitle={course.title}
+          courseCode={course.code}
+          academicNodes={academicNodes}
+          onSelectTopic={handleSelectTopicById}
+        />
+      )}
+
+      {/* Topic Learning Workspace Drawer */}
+      <TopicWorkspaceDrawer
+        courseId={course.id}
+        topic={selectedTopic}
+        isOpen={isDrawerOpen}
+        onClose={() => {
+          setIsDrawerOpen(false);
+          setSelectedTopic(null);
+        }}
+        onTopicUpdated={loadData}
+      />
     </div>
   );
 }

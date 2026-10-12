@@ -1,6 +1,7 @@
 import { eq, and, desc, asc, ilike, lte, sql, inArray } from 'drizzle-orm';
 import postgres from 'postgres';
 import { drizzle } from 'drizzle-orm/postgres-js';
+import { AppError, assertOwnership } from '@campusflow/shared';
 import * as schema from './schema.js';
 import type {
   Course,
@@ -47,6 +48,20 @@ import type {
   TodayOverviewResponse,
   TodayAssessmentItem,
   TodayTopicItem,
+  TopicResource,
+  StudyPlan,
+  StudySession,
+  ExaminationPaper,
+  ExaminationQuestion,
+  ExamPaperStatus,
+  PracticeAssessment,
+  PracticeAssessmentFormat,
+  PracticeAssessmentStatus,
+  PracticeQuestion,
+  PracticeSubmission,
+  PracticeStudentAnswer,
+  PracticeDiagnosticReport,
+  AiTaskExecutionRecord,
 } from '@campusflow/types';
 
 function isValidIanaTimezone(timeZone: string): boolean {
@@ -244,14 +259,12 @@ export class PostgresDataStore {
 
   // --- Courses ---
   async getCourse(id: string, requesterUserId: string): Promise<Course> {
-    const rows = await this.db
-      .select()
-      .from(schema.courses)
-      .where(and(eq(schema.courses.id, id), eq(schema.courses.userId, requesterUserId)));
+    const rows = await this.db.select().from(schema.courses).where(eq(schema.courses.id, id));
     const r = rows[0];
     if (!r) {
-      throw new Error('Course not found.');
+      throw AppError.notFound('Course not found.');
     }
+    assertOwnership(r.userId, requesterUserId, 'Course');
     return {
       id: r.id,
       userId: r.userId,
@@ -311,9 +324,14 @@ export class PostgresDataStore {
   }
 
   async deleteCourse(id: string, requesterUserId: string): Promise<void> {
-    await this.db
-      .delete(schema.courses)
-      .where(and(eq(schema.courses.id, id), eq(schema.courses.userId, requesterUserId)));
+    const rows = await this.db
+      .select({ userId: schema.courses.userId })
+      .from(schema.courses)
+      .where(eq(schema.courses.id, id));
+    const r = rows[0];
+    if (!r) return;
+    assertOwnership(r.userId, requesterUserId, 'Course');
+    await this.db.delete(schema.courses).where(eq(schema.courses.id, id));
   }
 
   // --- Assessments ---
@@ -337,11 +355,12 @@ export class PostgresDataStore {
     const rows = await this.db
       .select()
       .from(schema.assessments)
-      .where(and(eq(schema.assessments.id, id), eq(schema.assessments.userId, requesterUserId)));
+      .where(eq(schema.assessments.id, id));
     const r = rows[0];
     if (!r) {
-      throw new Error('Assessment not found.');
+      throw AppError.notFound('Assessment not found.');
     }
+    assertOwnership(r.userId, requesterUserId, 'Assessment');
     const assessment = this.mapAssessmentRow(r);
     const linkedTopics = await this.getAssessmentLinkedTopics(id, r.courseId, requesterUserId);
 
@@ -1091,6 +1110,10 @@ export class PostgresDataStore {
       origin: r.origin as AcademicNode['origin'],
       confidence: r.confidence ? Number(r.confidence) : null,
       needsReview: r.needsReview as AcademicNode['needsReview'],
+      estimatedMinutes: r.estimatedMinutes ?? null,
+      learningObjectives: r.learningObjectives ?? null,
+      prerequisites: r.prerequisites ?? null,
+      notes: r.notes ?? null,
       createdAt: r.createdAt,
       updatedAt: r.updatedAt,
     }));
@@ -1116,6 +1139,10 @@ export class PostgresDataStore {
           confidence:
             n.confidence !== null && n.confidence !== undefined ? String(n.confidence) : '0.800',
           needsReview: n.needsReview,
+          estimatedMinutes: n.estimatedMinutes ?? null,
+          learningObjectives: n.learningObjectives ?? null,
+          prerequisites: n.prerequisites ?? null,
+          notes: n.notes ?? null,
         })
         .returning();
       const r = rows[0];
@@ -1132,6 +1159,10 @@ export class PostgresDataStore {
           origin: r.origin as AcademicNode['origin'],
           confidence: r.confidence ? Number(r.confidence) : null,
           needsReview: r.needsReview as AcademicNode['needsReview'],
+          estimatedMinutes: r.estimatedMinutes ?? null,
+          learningObjectives: r.learningObjectives ?? null,
+          prerequisites: r.prerequisites ?? null,
+          notes: r.notes ?? null,
           createdAt: r.createdAt,
           updatedAt: r.updatedAt,
         });
@@ -1152,6 +1183,11 @@ export class PostgresDataStore {
     if (updates.needsReview !== undefined) values.needsReview = updates.needsReview;
     if (updates.parentId !== undefined) values.parentId = updates.parentId;
     if (updates.origin !== undefined) values.origin = updates.origin;
+    if (updates.estimatedMinutes !== undefined) values.estimatedMinutes = updates.estimatedMinutes;
+    if (updates.learningObjectives !== undefined)
+      values.learningObjectives = updates.learningObjectives;
+    if (updates.prerequisites !== undefined) values.prerequisites = updates.prerequisites;
+    if (updates.notes !== undefined) values.notes = updates.notes;
 
     const rows = await this.db
       .update(schema.academicNodes)
@@ -1174,6 +1210,10 @@ export class PostgresDataStore {
       origin: r.origin as AcademicNode['origin'],
       confidence: r.confidence ? Number(r.confidence) : null,
       needsReview: r.needsReview as AcademicNode['needsReview'],
+      estimatedMinutes: r.estimatedMinutes ?? null,
+      learningObjectives: r.learningObjectives ?? null,
+      prerequisites: r.prerequisites ?? null,
+      notes: r.notes ?? null,
       createdAt: r.createdAt,
       updatedAt: r.updatedAt,
     };
@@ -3457,6 +3497,937 @@ export class PostgresDataStore {
       updatedAt: r.updatedAt,
     };
   }
+
+  // --- Topic Resources ---
+  async listTopicResources(topicId: string, requesterUserId: string): Promise<TopicResource[]> {
+    const rows = await this.db
+      .select()
+      .from(schema.topicResources)
+      .where(
+        and(
+          eq(schema.topicResources.topicId, topicId),
+          eq(schema.topicResources.userId, requesterUserId),
+        ),
+      )
+      .orderBy(desc(schema.topicResources.createdAt));
+
+    return rows.map((r) => ({
+      id: r.id,
+      topicId: r.topicId,
+      courseId: r.courseId,
+      userId: r.userId,
+      title: r.title,
+      provider: r.provider,
+      url: r.url,
+      type: r.type as TopicResource['type'],
+      verificationStatus: r.verificationStatus as TopicResource['verificationStatus'],
+      relevanceNote: r.relevanceNote,
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
+    }));
+  }
+
+  async createTopicResource(
+    data: Omit<TopicResource, 'id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<TopicResource> {
+    const rows = await this.db
+      .insert(schema.topicResources)
+      .values({
+        topicId: data.topicId,
+        courseId: data.courseId,
+        userId: data.userId,
+        title: data.title,
+        provider: data.provider ?? null,
+        url: data.url ?? null,
+        type: data.type,
+        verificationStatus: data.verificationStatus,
+        relevanceNote: data.relevanceNote ?? null,
+      })
+      .returning();
+
+    const r = rows[0];
+    if (!r) throw new Error('Failed to create topic resource.');
+
+    return {
+      id: r.id,
+      topicId: r.topicId,
+      courseId: r.courseId,
+      userId: r.userId,
+      title: r.title,
+      provider: r.provider,
+      url: r.url,
+      type: r.type as TopicResource['type'],
+      verificationStatus: r.verificationStatus as TopicResource['verificationStatus'],
+      relevanceNote: r.relevanceNote,
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
+    };
+  }
+
+  async deleteTopicResource(id: string, requesterUserId: string): Promise<void> {
+    await this.db
+      .delete(schema.topicResources)
+      .where(
+        and(eq(schema.topicResources.id, id), eq(schema.topicResources.userId, requesterUserId)),
+      );
+  }
+
+  // --- Study Plans ---
+  async createStudyPlan(
+    data: Omit<StudyPlan, 'id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<StudyPlan> {
+    const rows = await this.db
+      .insert(schema.studyPlans)
+      .values({
+        userId: data.userId,
+        courseId: data.courseId ?? null,
+        title: data.title,
+        targetExamDate: data.targetExamDate ?? null,
+        availableHoursPerWeek: String(data.availableHoursPerWeek ?? 10.0),
+        dailyTargetMinutes: data.dailyTargetMinutes ?? 60,
+        status: data.status || 'active',
+      })
+      .returning();
+
+    const r = rows[0];
+    if (!r) throw new Error('Failed to create study plan.');
+
+    return {
+      id: r.id,
+      userId: r.userId,
+      courseId: r.courseId,
+      title: r.title,
+      targetExamDate: r.targetExamDate,
+      availableHoursPerWeek: r.availableHoursPerWeek ? Number(r.availableHoursPerWeek) : 10.0,
+      dailyTargetMinutes: r.dailyTargetMinutes ?? 60,
+      status: r.status as StudyPlan['status'],
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
+    };
+  }
+
+  async getStudyPlan(id: string, requesterUserId: string): Promise<StudyPlan> {
+    const rows = await this.db
+      .select()
+      .from(schema.studyPlans)
+      .where(and(eq(schema.studyPlans.id, id), eq(schema.studyPlans.userId, requesterUserId)));
+
+    const r = rows[0];
+    if (!r) throw new Error('Study plan not found.');
+
+    return {
+      id: r.id,
+      userId: r.userId,
+      courseId: r.courseId,
+      title: r.title,
+      targetExamDate: r.targetExamDate,
+      availableHoursPerWeek: r.availableHoursPerWeek ? Number(r.availableHoursPerWeek) : 10.0,
+      dailyTargetMinutes: r.dailyTargetMinutes ?? 60,
+      status: r.status as StudyPlan['status'],
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
+    };
+  }
+
+  async listStudyPlans(userId: string, courseId?: string): Promise<StudyPlan[]> {
+    const conditions = [eq(schema.studyPlans.userId, userId)];
+    if (courseId) {
+      conditions.push(eq(schema.studyPlans.courseId, courseId));
+    }
+
+    const rows = await this.db
+      .select()
+      .from(schema.studyPlans)
+      .where(and(...conditions))
+      .orderBy(desc(schema.studyPlans.createdAt));
+
+    return rows.map((r) => ({
+      id: r.id,
+      userId: r.userId,
+      courseId: r.courseId,
+      title: r.title,
+      targetExamDate: r.targetExamDate,
+      availableHoursPerWeek: r.availableHoursPerWeek ? Number(r.availableHoursPerWeek) : 10.0,
+      dailyTargetMinutes: r.dailyTargetMinutes ?? 60,
+      status: r.status as StudyPlan['status'],
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
+    }));
+  }
+
+  async updateStudyPlan(
+    id: string,
+    requesterUserId: string,
+    updates: Partial<StudyPlan>,
+  ): Promise<StudyPlan> {
+    const values: Partial<schema.NewStudyPlanRow> = { updatedAt: new Date() };
+    if (updates.title !== undefined) values.title = updates.title;
+    if (updates.targetExamDate !== undefined) values.targetExamDate = updates.targetExamDate;
+    if (updates.availableHoursPerWeek !== undefined)
+      values.availableHoursPerWeek = String(updates.availableHoursPerWeek);
+    if (updates.dailyTargetMinutes !== undefined)
+      values.dailyTargetMinutes = updates.dailyTargetMinutes;
+    if (updates.status !== undefined) values.status = updates.status;
+
+    const rows = await this.db
+      .update(schema.studyPlans)
+      .set(values)
+      .where(and(eq(schema.studyPlans.id, id), eq(schema.studyPlans.userId, requesterUserId)))
+      .returning();
+
+    const r = rows[0];
+    if (!r) throw new Error('Study plan not found.');
+
+    return {
+      id: r.id,
+      userId: r.userId,
+      courseId: r.courseId,
+      title: r.title,
+      targetExamDate: r.targetExamDate,
+      availableHoursPerWeek: r.availableHoursPerWeek ? Number(r.availableHoursPerWeek) : 10.0,
+      dailyTargetMinutes: r.dailyTargetMinutes ?? 60,
+      status: r.status as StudyPlan['status'],
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
+    };
+  }
+
+  async deleteStudyPlan(id: string, requesterUserId: string): Promise<void> {
+    await this.db
+      .delete(schema.studyPlans)
+      .where(and(eq(schema.studyPlans.id, id), eq(schema.studyPlans.userId, requesterUserId)));
+  }
+
+  // --- Study Sessions ---
+  async createStudySessions(
+    sessions: Array<Omit<StudySession, 'id' | 'createdAt' | 'updatedAt'>>,
+  ): Promise<StudySession[]> {
+    if (sessions.length === 0) return [];
+    const inserted: StudySession[] = [];
+    for (const s of sessions) {
+      const rows = await this.db
+        .insert(schema.studySessions)
+        .values({
+          planId: s.planId,
+          userId: s.userId,
+          courseId: s.courseId,
+          topicId: s.topicId,
+          title: s.title,
+          scheduledDate: s.scheduledDate,
+          durationMinutes: s.durationMinutes,
+          sessionType: s.sessionType,
+          status: s.status,
+          completedAt: s.completedAt ?? null,
+          notes: s.notes ?? null,
+          orderIndex: s.orderIndex,
+        })
+        .returning();
+
+      const r = rows[0];
+      if (r) {
+        inserted.push({
+          id: r.id,
+          planId: r.planId,
+          userId: r.userId,
+          courseId: r.courseId,
+          topicId: r.topicId,
+          title: r.title,
+          scheduledDate: r.scheduledDate,
+          durationMinutes: r.durationMinutes,
+          sessionType: r.sessionType as StudySession['sessionType'],
+          status: r.status as StudySession['status'],
+          completedAt: r.completedAt,
+          notes: r.notes,
+          orderIndex: r.orderIndex,
+          createdAt: r.createdAt,
+          updatedAt: r.updatedAt,
+        });
+      }
+    }
+    return inserted;
+  }
+
+  async listStudySessions(
+    planId: string,
+    requesterUserId: string,
+    range?: { start?: Date; end?: Date },
+  ): Promise<StudySession[]> {
+    const conditions = [
+      eq(schema.studySessions.planId, planId),
+      eq(schema.studySessions.userId, requesterUserId),
+    ];
+    if (range?.start) {
+      conditions.push(sql`${schema.studySessions.scheduledDate} >= ${range.start}`);
+    }
+    if (range?.end) {
+      conditions.push(sql`${schema.studySessions.scheduledDate} <= ${range.end}`);
+    }
+
+    const rows = await this.db
+      .select({
+        session: schema.studySessions,
+        topicTitle: schema.academicNodes.title,
+        courseCode: schema.courses.code,
+      })
+      .from(schema.studySessions)
+      .leftJoin(schema.academicNodes, eq(schema.studySessions.topicId, schema.academicNodes.id))
+      .leftJoin(schema.courses, eq(schema.studySessions.courseId, schema.courses.id))
+      .where(and(...conditions))
+      .orderBy(asc(schema.studySessions.scheduledDate));
+
+    return rows.map((r) => ({
+      id: r.session.id,
+      planId: r.session.planId,
+      userId: r.session.userId,
+      courseId: r.session.courseId,
+      topicId: r.session.topicId,
+      title: r.session.title,
+      scheduledDate: r.session.scheduledDate,
+      durationMinutes: r.session.durationMinutes,
+      sessionType: r.session.sessionType as StudySession['sessionType'],
+      status: r.session.status as StudySession['status'],
+      completedAt: r.session.completedAt,
+      notes: r.session.notes,
+      orderIndex: r.session.orderIndex,
+      createdAt: r.session.createdAt,
+      updatedAt: r.session.updatedAt,
+      topicTitle: r.topicTitle ?? undefined,
+      courseCode: r.courseCode ?? undefined,
+    }));
+  }
+
+  async updateStudySession(
+    id: string,
+    requesterUserId: string,
+    updates: Partial<StudySession>,
+  ): Promise<StudySession> {
+    const values: Partial<schema.NewStudySessionRow> = { updatedAt: new Date() };
+    if (updates.title !== undefined) values.title = updates.title;
+    if (updates.scheduledDate !== undefined) values.scheduledDate = updates.scheduledDate;
+    if (updates.durationMinutes !== undefined) values.durationMinutes = updates.durationMinutes;
+    if (updates.sessionType !== undefined) values.sessionType = updates.sessionType;
+    if (updates.status !== undefined) values.status = updates.status;
+    if (updates.completedAt !== undefined) values.completedAt = updates.completedAt;
+    if (updates.notes !== undefined) values.notes = updates.notes;
+    if (updates.orderIndex !== undefined) values.orderIndex = updates.orderIndex;
+
+    const rows = await this.db
+      .update(schema.studySessions)
+      .set(values)
+      .where(and(eq(schema.studySessions.id, id), eq(schema.studySessions.userId, requesterUserId)))
+      .returning();
+
+    const r = rows[0];
+    if (!r) throw new Error('Study session not found.');
+
+    return {
+      id: r.id,
+      planId: r.planId,
+      userId: r.userId,
+      courseId: r.courseId,
+      topicId: r.topicId,
+      title: r.title,
+      scheduledDate: r.scheduledDate,
+      durationMinutes: r.durationMinutes,
+      sessionType: r.sessionType as StudySession['sessionType'],
+      status: r.status as StudySession['status'],
+      completedAt: r.completedAt,
+      notes: r.notes,
+      orderIndex: r.orderIndex,
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
+    };
+  }
+
+  async deleteStudySession(id: string, requesterUserId: string): Promise<void> {
+    await this.db
+      .delete(schema.studySessions)
+      .where(
+        and(eq(schema.studySessions.id, id), eq(schema.studySessions.userId, requesterUserId)),
+      );
+  }
+
+  // =====================================================================
+  // Phase 2: Examination Papers & Questions
+  // =====================================================================
+
+  async createExaminationPaper(paper: {
+    userId: string;
+    courseId: string;
+    title: string;
+    resourceId?: string | null | undefined;
+    term?: string | null | undefined;
+    examType?: string | null | undefined;
+    academicYear?: string | null | undefined;
+    totalMarks?: number | null | undefined;
+    durationMinutes?: number | null | undefined;
+    instructions?: string | null | undefined;
+    status?: ExamPaperStatus | undefined;
+    metadata?: Record<string, unknown> | null | undefined;
+  }): Promise<ExaminationPaper> {
+    const [row] = await this.db
+      .insert(schema.examinationPapers)
+      .values({
+        userId: paper.userId,
+        courseId: paper.courseId,
+        resourceId: paper.resourceId || null,
+        title: paper.title,
+        term: paper.term || null,
+        examType: paper.examType || null,
+        academicYear: paper.academicYear || null,
+        totalMarks: paper.totalMarks != null ? paper.totalMarks.toString() : null,
+        durationMinutes: paper.durationMinutes || null,
+        instructions: paper.instructions || null,
+        status: paper.status || 'pending',
+        metadata: paper.metadata || null,
+      })
+      .returning();
+
+    if (!row) throw new Error('Failed to create examination paper.');
+    return this.mapExaminationPaperRow(row);
+  }
+
+  async getExaminationPaper(id: string, requesterUserId: string): Promise<ExaminationPaper> {
+    const [row] = await this.db
+      .select()
+      .from(schema.examinationPapers)
+      .where(eq(schema.examinationPapers.id, id));
+
+    if (!row) throw AppError.notFound('Examination paper not found.');
+    assertOwnership(row.userId, requesterUserId, 'ExaminationPaper');
+    return this.mapExaminationPaperRow(row);
+  }
+
+  async listExaminationPapers(
+    courseId: string,
+    requesterUserId: string,
+  ): Promise<ExaminationPaper[]> {
+    const rows = await this.db
+      .select()
+      .from(schema.examinationPapers)
+      .where(
+        and(
+          eq(schema.examinationPapers.courseId, courseId),
+          eq(schema.examinationPapers.userId, requesterUserId),
+        ),
+      )
+      .orderBy(desc(schema.examinationPapers.createdAt));
+
+    return rows.map((r) => this.mapExaminationPaperRow(r));
+  }
+
+  async updateExaminationPaper(
+    id: string,
+    requesterUserId: string,
+    updates: Partial<ExaminationPaper>,
+  ): Promise<ExaminationPaper> {
+    const values: Record<string, unknown> = { updatedAt: new Date() };
+    if (updates.title !== undefined) values['title'] = updates.title;
+    if (updates.term !== undefined) values['term'] = updates.term;
+    if (updates.examType !== undefined) values['examType'] = updates.examType;
+    if (updates.academicYear !== undefined) values['academicYear'] = updates.academicYear;
+    if (updates.totalMarks !== undefined)
+      values['totalMarks'] = updates.totalMarks != null ? updates.totalMarks.toString() : null;
+    if (updates.durationMinutes !== undefined) values['durationMinutes'] = updates.durationMinutes;
+    if (updates.instructions !== undefined) values['instructions'] = updates.instructions;
+    if (updates.status !== undefined) values['status'] = updates.status;
+    if (updates.metadata !== undefined) values['metadata'] = updates.metadata;
+
+    const [row] = await this.db
+      .update(schema.examinationPapers)
+      .set(values)
+      .where(
+        and(
+          eq(schema.examinationPapers.id, id),
+          eq(schema.examinationPapers.userId, requesterUserId),
+        ),
+      )
+      .returning();
+
+    if (!row) throw new Error('Examination paper not found for update.');
+    return this.mapExaminationPaperRow(row);
+  }
+
+  async deleteExaminationPaper(id: string, requesterUserId: string): Promise<void> {
+    await this.db
+      .delete(schema.examinationPapers)
+      .where(
+        and(
+          eq(schema.examinationPapers.id, id),
+          eq(schema.examinationPapers.userId, requesterUserId),
+        ),
+      );
+  }
+
+  async createExaminationQuestions(
+    questions: Array<Omit<ExaminationQuestion, 'id' | 'createdAt' | 'updatedAt'>>,
+  ): Promise<ExaminationQuestion[]> {
+    if (questions.length === 0) return [];
+
+    const values = questions.map((q) => ({
+      paperId: q.paperId,
+      userId: q.userId,
+      courseId: q.courseId,
+      questionNumber: q.questionNumber,
+      parentQuestionId: q.parentQuestionId || null,
+      questionText: q.questionText,
+      marks: q.marks != null ? q.marks.toString() : null,
+      pageNumber: q.pageNumber || null,
+      questionFormat: q.questionFormat,
+      options: q.options || null,
+      compulsory: q.compulsory,
+      choiceGroup: q.choiceGroup || null,
+      candidateTopics: q.candidateTopics || [],
+      topicId: q.topicId || null,
+      topicConfidence: q.topicConfidence != null ? q.topicConfidence.toString() : null,
+      difficulty: q.difficulty,
+      difficultyUncertainty:
+        q.difficultyUncertainty != null ? q.difficultyUncertainty.toString() : '0.200',
+      cognitiveLevel: q.cognitiveLevel || null,
+      verificationStatus: q.verificationStatus,
+      userNotes: q.userNotes || null,
+      sourceSnippet: q.sourceSnippet || null,
+    }));
+
+    const rows = await this.db.insert(schema.examinationQuestions).values(values).returning();
+    return rows.map((r) => this.mapExaminationQuestionRow(r));
+  }
+
+  async listQuestionsForPaper(
+    paperId: string,
+    requesterUserId: string,
+  ): Promise<ExaminationQuestion[]> {
+    const rows = await this.db
+      .select({
+        q: schema.examinationQuestions,
+        topicTitle: schema.academicNodes.title,
+      })
+      .from(schema.examinationQuestions)
+      .leftJoin(
+        schema.academicNodes,
+        eq(schema.examinationQuestions.topicId, schema.academicNodes.id),
+      )
+      .where(
+        and(
+          eq(schema.examinationQuestions.paperId, paperId),
+          eq(schema.examinationQuestions.userId, requesterUserId),
+        ),
+      )
+      .orderBy(asc(schema.examinationQuestions.questionNumber));
+
+    return rows.map(({ q, topicTitle }) => ({
+      ...this.mapExaminationQuestionRow(q),
+      topicTitle: topicTitle || undefined,
+    }));
+  }
+
+  async listQuestionsForCourse(
+    courseId: string,
+    requesterUserId: string,
+  ): Promise<ExaminationQuestion[]> {
+    const rows = await this.db
+      .select({
+        q: schema.examinationQuestions,
+        topicTitle: schema.academicNodes.title,
+      })
+      .from(schema.examinationQuestions)
+      .leftJoin(
+        schema.academicNodes,
+        eq(schema.examinationQuestions.topicId, schema.academicNodes.id),
+      )
+      .where(
+        and(
+          eq(schema.examinationQuestions.courseId, courseId),
+          eq(schema.examinationQuestions.userId, requesterUserId),
+        ),
+      );
+
+    return rows.map(({ q, topicTitle }) => ({
+      ...this.mapExaminationQuestionRow(q),
+      topicTitle: topicTitle || undefined,
+    }));
+  }
+
+  async updateExaminationQuestion(
+    id: string,
+    requesterUserId: string,
+    updates: Partial<ExaminationQuestion>,
+  ): Promise<ExaminationQuestion> {
+    const values: Record<string, unknown> = { updatedAt: new Date() };
+    if (updates.questionText !== undefined) values['questionText'] = updates.questionText;
+    if (updates.marks !== undefined)
+      values['marks'] = updates.marks != null ? updates.marks.toString() : null;
+    if (updates.topicId !== undefined) values['topicId'] = updates.topicId;
+    if (updates.topicConfidence !== undefined)
+      values['topicConfidence'] =
+        updates.topicConfidence != null ? updates.topicConfidence.toString() : null;
+    if (updates.difficulty !== undefined) values['difficulty'] = updates.difficulty;
+    if (updates.difficultyUncertainty !== undefined)
+      values['difficultyUncertainty'] =
+        updates.difficultyUncertainty != null ? updates.difficultyUncertainty.toString() : null;
+    if (updates.verificationStatus !== undefined)
+      values['verificationStatus'] = updates.verificationStatus;
+    if (updates.userNotes !== undefined) values['userNotes'] = updates.userNotes;
+    if (updates.options !== undefined) values['options'] = updates.options;
+    if (updates.questionFormat !== undefined) values['questionFormat'] = updates.questionFormat;
+
+    const [row] = await this.db
+      .update(schema.examinationQuestions)
+      .set(values)
+      .where(
+        and(
+          eq(schema.examinationQuestions.id, id),
+          eq(schema.examinationQuestions.userId, requesterUserId),
+        ),
+      )
+      .returning();
+
+    if (!row) throw new Error('Examination question not found for update.');
+    return this.mapExaminationQuestionRow(row);
+  }
+
+  async deleteExaminationQuestion(id: string, requesterUserId: string): Promise<void> {
+    await this.db
+      .delete(schema.examinationQuestions)
+      .where(
+        and(
+          eq(schema.examinationQuestions.id, id),
+          eq(schema.examinationQuestions.userId, requesterUserId),
+        ),
+      );
+  }
+
+  // =====================================================================
+  // Phase 2: Practice Assessments & Submissions
+  // =====================================================================
+
+  async createPracticeAssessment(assessment: {
+    userId: string;
+    courseId: string;
+    title: string;
+    format: PracticeAssessmentFormat;
+    blueprintId?: string | null | undefined;
+    totalMarks: number;
+    durationMinutes: number;
+    difficulty: 'easy' | 'medium' | 'hard';
+    status?: PracticeAssessmentStatus | undefined;
+    questions: PracticeQuestion[];
+  }): Promise<PracticeAssessment> {
+    const [row] = await this.db
+      .insert(schema.practiceAssessments)
+      .values({
+        userId: assessment.userId,
+        courseId: assessment.courseId,
+        title: assessment.title,
+        format: assessment.format,
+        blueprintId: assessment.blueprintId || null,
+        totalMarks: assessment.totalMarks.toString(),
+        durationMinutes: assessment.durationMinutes,
+        difficulty: assessment.difficulty,
+        status: assessment.status || 'ready',
+        questions: assessment.questions,
+      })
+      .returning();
+
+    if (!row) throw new Error('Failed to create practice assessment.');
+    return this.mapPracticeAssessmentRow(row);
+  }
+
+  async getPracticeAssessment(id: string, requesterUserId: string): Promise<PracticeAssessment> {
+    const [row] = await this.db
+      .select()
+      .from(schema.practiceAssessments)
+      .where(eq(schema.practiceAssessments.id, id));
+
+    if (!row) throw AppError.notFound('Practice assessment not found.');
+    assertOwnership(row.userId, requesterUserId, 'PracticeAssessment');
+    return this.mapPracticeAssessmentRow(row);
+  }
+
+  async listPracticeAssessments(
+    courseId: string,
+    requesterUserId: string,
+  ): Promise<PracticeAssessment[]> {
+    const rows = await this.db
+      .select()
+      .from(schema.practiceAssessments)
+      .where(
+        and(
+          eq(schema.practiceAssessments.courseId, courseId),
+          eq(schema.practiceAssessments.userId, requesterUserId),
+        ),
+      )
+      .orderBy(desc(schema.practiceAssessments.createdAt));
+
+    return rows.map((r) => this.mapPracticeAssessmentRow(r));
+  }
+
+  async updatePracticeAssessment(
+    id: string,
+    requesterUserId: string,
+    updates: Partial<PracticeAssessment>,
+  ): Promise<PracticeAssessment> {
+    const values: Record<string, unknown> = { updatedAt: new Date() };
+    if (updates.title !== undefined) values['title'] = updates.title;
+    if (updates.status !== undefined) values['status'] = updates.status;
+    if (updates.questions !== undefined) values['questions'] = updates.questions;
+
+    const [row] = await this.db
+      .update(schema.practiceAssessments)
+      .set(values)
+      .where(
+        and(
+          eq(schema.practiceAssessments.id, id),
+          eq(schema.practiceAssessments.userId, requesterUserId),
+        ),
+      )
+      .returning();
+
+    if (!row) throw new Error('Practice assessment not found for update.');
+    return this.mapPracticeAssessmentRow(row);
+  }
+
+  async createPracticeSubmission(sub: {
+    assessmentId: string;
+    userId: string;
+    courseId: string;
+    startedAt?: Date | undefined;
+    submittedAt?: Date | null | undefined;
+    timeSpentSeconds?: number | undefined;
+    answers: Record<string, PracticeStudentAnswer>;
+    diagnosticFeedback?: PracticeDiagnosticReport | null | undefined;
+  }): Promise<PracticeSubmission> {
+    const [row] = await this.db
+      .insert(schema.practiceSubmissions)
+      .values({
+        assessmentId: sub.assessmentId,
+        userId: sub.userId,
+        courseId: sub.courseId,
+        startedAt: sub.startedAt || new Date(),
+        submittedAt: sub.submittedAt || null,
+        timeSpentSeconds: sub.timeSpentSeconds || 0,
+        answers: sub.answers,
+        diagnosticFeedback: sub.diagnosticFeedback || null,
+      })
+      .returning();
+
+    if (!row) throw new Error('Failed to create practice submission.');
+    return this.mapPracticeSubmissionRow(row);
+  }
+
+  async getPracticeSubmission(id: string, requesterUserId: string): Promise<PracticeSubmission> {
+    const [row] = await this.db
+      .select()
+      .from(schema.practiceSubmissions)
+      .where(
+        and(
+          eq(schema.practiceSubmissions.id, id),
+          eq(schema.practiceSubmissions.userId, requesterUserId),
+        ),
+      );
+
+    if (!row) throw new Error('Practice submission not found.');
+    return this.mapPracticeSubmissionRow(row);
+  }
+
+  async listPracticeSubmissions(
+    assessmentId: string,
+    requesterUserId: string,
+  ): Promise<PracticeSubmission[]> {
+    const rows = await this.db
+      .select()
+      .from(schema.practiceSubmissions)
+      .where(
+        and(
+          eq(schema.practiceSubmissions.assessmentId, assessmentId),
+          eq(schema.practiceSubmissions.userId, requesterUserId),
+        ),
+      )
+      .orderBy(desc(schema.practiceSubmissions.startedAt));
+
+    return rows.map((r) => this.mapPracticeSubmissionRow(r));
+  }
+
+  async updatePracticeSubmission(
+    id: string,
+    requesterUserId: string,
+    updates: Partial<PracticeSubmission>,
+  ): Promise<PracticeSubmission> {
+    const values: Record<string, unknown> = { updatedAt: new Date() };
+    if (updates.submittedAt !== undefined) values['submittedAt'] = updates.submittedAt;
+    if (updates.timeSpentSeconds !== undefined)
+      values['timeSpentSeconds'] = updates.timeSpentSeconds;
+    if (updates.answers !== undefined) values['answers'] = updates.answers;
+    if (updates.diagnosticFeedback !== undefined)
+      values['diagnosticFeedback'] = updates.diagnosticFeedback;
+
+    const [row] = await this.db
+      .update(schema.practiceSubmissions)
+      .set(values)
+      .where(
+        and(
+          eq(schema.practiceSubmissions.id, id),
+          eq(schema.practiceSubmissions.userId, requesterUserId),
+        ),
+      )
+      .returning();
+
+    if (!row) throw new Error('Practice submission not found for update.');
+    return this.mapPracticeSubmissionRow(row);
+  }
+
+  // =====================================================================
+  // Phase 2: AI Usage Records
+  // =====================================================================
+
+  async recordAiUsage(
+    record: Omit<AiTaskExecutionRecord, 'id' | 'createdAt'>,
+  ): Promise<AiTaskExecutionRecord> {
+    const [row] = await this.db
+      .insert(schema.aiUsageRecords)
+      .values({
+        userId: record.userId,
+        taskType: record.taskType,
+        taskVersion: record.taskVersion,
+        model: record.model,
+        provider: record.provider,
+        inputTokens: record.inputTokens || 0,
+        outputTokens: record.outputTokens || 0,
+        estimatedCostMicroCents: record.estimatedCostMicroCents || 0,
+        durationMs: record.durationMs,
+        status: record.status,
+        contentHash: record.contentHash || null,
+        cached: record.cached,
+      })
+      .returning();
+
+    if (!row) throw new Error('Failed to record AI usage.');
+    return {
+      id: row.id,
+      userId: row.userId,
+      taskType: row.taskType,
+      taskVersion: row.taskVersion,
+      model: row.model,
+      provider: row.provider,
+      inputTokens: row.inputTokens ?? undefined,
+      outputTokens: row.outputTokens ?? undefined,
+      estimatedCostMicroCents: row.estimatedCostMicroCents ?? undefined,
+      durationMs: row.durationMs ?? 0,
+      status: row.status as AiTaskExecutionRecord['status'],
+      contentHash: row.contentHash ?? undefined,
+      cached: row.cached ?? false,
+      createdAt: row.createdAt,
+    };
+  }
+
+  async listAiUsageRecords(userId: string, limit = 50): Promise<AiTaskExecutionRecord[]> {
+    const rows = await this.db
+      .select()
+      .from(schema.aiUsageRecords)
+      .where(eq(schema.aiUsageRecords.userId, userId))
+      .orderBy(desc(schema.aiUsageRecords.createdAt))
+      .limit(limit);
+
+    return rows.map((r) => ({
+      id: r.id,
+      userId: r.userId,
+      taskType: r.taskType,
+      taskVersion: r.taskVersion,
+      model: r.model,
+      provider: r.provider,
+      inputTokens: r.inputTokens ?? undefined,
+      outputTokens: r.outputTokens ?? undefined,
+      estimatedCostMicroCents: r.estimatedCostMicroCents ?? undefined,
+      durationMs: r.durationMs ?? 0,
+      status: r.status as AiTaskExecutionRecord['status'],
+      contentHash: r.contentHash ?? undefined,
+      cached: r.cached ?? false,
+      createdAt: r.createdAt,
+    }));
+  }
+
+  private mapExaminationPaperRow(r: schema.ExaminationPaperRow): ExaminationPaper {
+    return {
+      id: r.id,
+      userId: r.userId,
+      courseId: r.courseId,
+      resourceId: r.resourceId,
+      title: r.title,
+      term: r.term,
+      examType: r.examType,
+      academicYear: r.academicYear,
+      totalMarks: r.totalMarks ? parseFloat(r.totalMarks) : null,
+      durationMinutes: r.durationMinutes,
+      instructions: r.instructions,
+      status: r.status as ExamPaperStatus,
+      metadata: r.metadata as Record<string, unknown> | null,
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
+    };
+  }
+
+  private mapExaminationQuestionRow(r: schema.ExaminationQuestionRow): ExaminationQuestion {
+    return {
+      id: r.id,
+      paperId: r.paperId,
+      userId: r.userId,
+      courseId: r.courseId,
+      questionNumber: r.questionNumber,
+      parentQuestionId: r.parentQuestionId,
+      questionText: r.questionText,
+      marks: r.marks ? parseFloat(r.marks) : null,
+      pageNumber: r.pageNumber,
+      questionFormat: r.questionFormat as ExaminationQuestion['questionFormat'],
+      options: r.options as ExaminationQuestion['options'],
+      compulsory: r.compulsory,
+      choiceGroup: r.choiceGroup,
+      candidateTopics: (r.candidateTopics || []) as ExaminationQuestion['candidateTopics'],
+      topicId: r.topicId,
+      topicConfidence: r.topicConfidence ? parseFloat(r.topicConfidence) : null,
+      difficulty: r.difficulty as ExaminationQuestion['difficulty'],
+      difficultyUncertainty: r.difficultyUncertainty ? parseFloat(r.difficultyUncertainty) : 0.2,
+      cognitiveLevel: r.cognitiveLevel as ExaminationQuestion['cognitiveLevel'],
+      verificationStatus: r.verificationStatus as ExaminationQuestion['verificationStatus'],
+      userNotes: r.userNotes,
+      sourceSnippet: r.sourceSnippet,
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
+    };
+  }
+
+  private mapPracticeAssessmentRow(r: schema.PracticeAssessmentRow): PracticeAssessment {
+    return {
+      id: r.id,
+      userId: r.userId,
+      courseId: r.courseId,
+      title: r.title,
+      format: r.format as PracticeAssessmentFormat,
+      blueprintId: r.blueprintId,
+      totalMarks: parseFloat(r.totalMarks),
+      durationMinutes: r.durationMinutes,
+      difficulty: r.difficulty as 'easy' | 'medium' | 'hard',
+      status: r.status as PracticeAssessmentStatus,
+      questions: (r.questions || []) as PracticeQuestion[],
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
+    };
+  }
+
+  private mapPracticeSubmissionRow(r: schema.PracticeSubmissionRow): PracticeSubmission {
+    return {
+      id: r.id,
+      assessmentId: r.assessmentId,
+      userId: r.userId,
+      courseId: r.courseId,
+      startedAt: r.startedAt,
+      submittedAt: r.submittedAt,
+      timeSpentSeconds: r.timeSpentSeconds,
+      answers: (r.answers || {}) as Record<string, PracticeStudentAnswer>,
+      diagnosticFeedback: (r.diagnosticFeedback || null) as PracticeDiagnosticReport | null,
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
+    };
+  }
 }
 
 export class PostgresOutboxStore {
@@ -3571,12 +4542,6 @@ export class PostgresOutboxStore {
         and(eq(schema.jobOutbox.status, 'running'), lte(schema.jobOutbox.lockedAt, staleBefore)),
       );
     return rows.map((r) => this.mapJobRow(r));
-  }
-
-  async close(): Promise<void> {
-    if (this.rawSql) {
-      await this.rawSql.end();
-    }
   }
 
   private mapJobRow(r: schema.JobOutboxRow): JobOutboxRecord {

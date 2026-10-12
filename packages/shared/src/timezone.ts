@@ -138,6 +138,63 @@ export function getDayBoundariesInTimezone(
   return { startOfToday, startOfNextDay, endOfToday };
 }
 
+export const DEFAULT_LOCALE = 'en-US';
+export const DEFAULT_TIMEZONE = 'UTC';
+
+export function formatHeaderDate(
+  date: Date = new Date(),
+  timeZone: string = DEFAULT_TIMEZONE,
+  locale: string = DEFAULT_LOCALE,
+): string {
+  const options: Intl.DateTimeFormatOptions = {
+    weekday: 'long',
+    month: 'long',
+    day: 'numeric',
+    year: 'numeric',
+  };
+  if (timeZone && isValidIanaTimezone(timeZone)) {
+    options.timeZone = timeZone;
+  }
+  return new Intl.DateTimeFormat(locale, options).format(date);
+}
+
+export function formatShortDate(
+  date: Date | string | number | null | undefined,
+  timeZone: string = DEFAULT_TIMEZONE,
+  locale: string = DEFAULT_LOCALE,
+): string {
+  if (!date) return 'No date set';
+  const d = date instanceof Date ? date : new Date(date);
+  if (isNaN(d.getTime())) return 'Invalid date';
+  const options: Intl.DateTimeFormatOptions = {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  };
+  if (timeZone && isValidIanaTimezone(timeZone)) {
+    options.timeZone = timeZone;
+  }
+  return new Intl.DateTimeFormat(locale, options).format(d);
+}
+
+export function formatMonthDay(
+  date: Date | string | number | null | undefined,
+  timeZone: string = DEFAULT_TIMEZONE,
+  locale: string = DEFAULT_LOCALE,
+): string {
+  if (!date) return 'Never';
+  const d = date instanceof Date ? date : new Date(date);
+  if (isNaN(d.getTime())) return 'Never';
+  const options: Intl.DateTimeFormatOptions = {
+    month: 'short',
+    day: 'numeric',
+  };
+  if (timeZone && isValidIanaTimezone(timeZone)) {
+    options.timeZone = timeZone;
+  }
+  return new Intl.DateTimeFormat(locale, options).format(d);
+}
+
 export function sortAssessmentsChronologically<
   T extends { date?: Date | string | null; id: string },
 >(items: T[]): T[] {

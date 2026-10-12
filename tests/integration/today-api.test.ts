@@ -217,4 +217,113 @@ describe('Today API Integration Suite (GET /api/v1/today)', () => {
     expect(body.assessments.completed).toHaveLength(1);
     expect(body.assessments.completed[0].timeframe).toBe('completed');
   });
+
+  it('7. CORS Preflight: OPTIONS /api/v1/today succeeds without authentication and returns CORS headers', async () => {
+    // When AUTH_TEST_BYPASS is explicitly disabled, preflight MUST still succeed without 401
+    const originalBypass = process.env['AUTH_TEST_BYPASS'];
+    delete process.env['AUTH_TEST_BYPASS'];
+
+    try {
+      const res = await app.request('/api/v1/today', {
+        method: 'OPTIONS',
+        headers: {
+          Origin: 'http://localhost:3000',
+          'Access-Control-Request-Method': 'GET',
+          'Access-Control-Request-Headers': 'Authorization, Content-Type',
+        },
+      });
+
+      expect(res.status).toBe(204);
+      expect(res.headers.get('access-control-allow-origin')).toBe('http://localhost:3000');
+      expect(res.headers.get('access-control-allow-methods')).toContain('GET');
+      expect(res.headers.get('access-control-allow-credentials')).toBe('true');
+    } finally {
+      process.env['AUTH_TEST_BYPASS'] = originalBypass;
+    }
+  });
+
+  it('8. Security boundary: Protected request without Bearer token returns 401 Unauthorized', async () => {
+    const originalBypass = process.env['AUTH_TEST_BYPASS'];
+    delete process.env['AUTH_TEST_BYPASS'];
+
+    try {
+      const res = await app.request('/api/v1/today', {
+        method: 'GET',
+        headers: {
+          Origin: 'http://localhost:3000',
+        },
+      });
+
+      expect(res.status).toBe(401);
+      const body = await res.json();
+      expect(body.detail).toContain('Authentication token required');
+    } finally {
+      process.env['AUTH_TEST_BYPASS'] = originalBypass;
+    }
+  });
+
+  it('9. Security boundary: Authenticated request with Bearer token succeeds on /api/v1/today', async () => {
+    process.env['AUTH_TEST_BYPASS'] = 'true';
+    const res = await app.request('/api/v1/today', {
+      method: 'GET',
+      headers: {
+        Origin: 'http://localhost:3000',
+        Authorization: `Bearer test_user_${userA}`,
+      },
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toHaveProperty('courses');
+    expect(body).toHaveProperty('assessments');
+    expect(body).toHaveProperty('summary');
+  });
+
+  it('10. Security boundary: Empty or malformed Bearer token returns 401 Unauthorized', async () => {
+    const originalBypass = process.env['AUTH_TEST_BYPASS'];
+    delete process.env['AUTH_TEST_BYPASS'];
+
+    try {
+      const emptyRes = await app.request('/api/v1/today', {
+        method: 'GET',
+        headers: {
+          Origin: 'http://localhost:3000',
+          Authorization: 'Bearer   ',
+        },
+      });
+      expect(emptyRes.status).toBe(401);
+      const emptyBody = await emptyRes.json();
+      expect(emptyBody.detail).toContain('Empty authentication token');
+
+      const nonBearerRes = await app.request('/api/v1/today', {
+        method: 'GET',
+        headers: {
+          Origin: 'http://localhost:3000',
+          Authorization: 'Basic dXNlcjpwYXNz',
+        },
+      });
+      expect(nonBearerRes.status).toBe(401);
+      const nonBearerBody = await nonBearerRes.json();
+      expect(nonBearerBody.detail).toContain('Authentication token required');
+    } finally {
+      process.env['AUTH_TEST_BYPASS'] = originalBypass;
+    }
+  });
+
+  it('11. Clerk ID to internal UUID mapping: non-UUID Clerk user ID maps to a valid internal UUID', async () => {
+    process.env['AUTH_TEST_BYPASS'] = 'true';
+    const clerkUserId = 'user_2xyzAbc123TestStudent';
+    const res = await app.request('/api/v1/today', {
+      method: 'GET',
+      headers: {
+        Origin: 'http://localhost:3000',
+        Authorization: `Bearer test_user_${clerkUserId}`,
+      },
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.courses).toHaveLength(0);
+    expect(body.summary.totalCourses).toBe(0);
+  });
 });

@@ -49,6 +49,20 @@ import {
   TodayOverviewResponse,
   TodayAssessmentItem,
   TodayTopicItem,
+  TopicResource,
+  StudyPlan,
+  StudySession,
+  ExaminationPaper,
+  ExaminationQuestion,
+  ExamPaperStatus,
+  PracticeAssessment,
+  PracticeAssessmentFormat,
+  PracticeAssessmentStatus,
+  PracticeQuestion,
+  PracticeSubmission,
+  PracticeStudentAnswer,
+  PracticeDiagnosticReport,
+  AiTaskExecutionRecord,
 } from '@campusflow/types';
 import {
   AppError,
@@ -240,6 +254,40 @@ export interface DataStore {
   ): Promise<StudyEvent[]>;
   getTodayOverview(userId: string, timezone?: string, now?: Date): Promise<TodayOverviewResponse>;
 
+  // Topic Resources
+  listTopicResources(topicId: string, requesterUserId: string): Promise<TopicResource[]>;
+  createTopicResource(
+    data: Omit<TopicResource, 'id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<TopicResource>;
+  deleteTopicResource(id: string, requesterUserId: string): Promise<void>;
+
+  // Study Plans
+  createStudyPlan(data: Omit<StudyPlan, 'id' | 'createdAt' | 'updatedAt'>): Promise<StudyPlan>;
+  getStudyPlan(id: string, requesterUserId: string): Promise<StudyPlan>;
+  listStudyPlans(userId: string, courseId?: string): Promise<StudyPlan[]>;
+  updateStudyPlan(
+    id: string,
+    requesterUserId: string,
+    updates: Partial<StudyPlan>,
+  ): Promise<StudyPlan>;
+  deleteStudyPlan(id: string, requesterUserId: string): Promise<void>;
+
+  // Study Sessions
+  createStudySessions(
+    sessions: Array<Omit<StudySession, 'id' | 'createdAt' | 'updatedAt'>>,
+  ): Promise<StudySession[]>;
+  listStudySessions(
+    planId: string,
+    requesterUserId: string,
+    range?: { start?: Date; end?: Date },
+  ): Promise<StudySession[]>;
+  updateStudySession(
+    id: string,
+    requesterUserId: string,
+    updates: Partial<StudySession>,
+  ): Promise<StudySession>;
+  deleteStudySession(id: string, requesterUserId: string): Promise<void>;
+
   deleteUser(id: string): Promise<void>;
 
   // Role Families
@@ -428,6 +476,92 @@ export interface DataStore {
   // Model Cards
   createModelCard(card: ModelCard): Promise<ModelCard>;
   getModelCard(modelVersion: string): Promise<ModelCard | null>;
+
+  // Examination Papers
+  createExaminationPaper(paper: {
+    userId: string;
+    courseId: string;
+    title: string;
+    resourceId?: string | null | undefined;
+    term?: string | null | undefined;
+    examType?: string | null | undefined;
+    academicYear?: string | null | undefined;
+    totalMarks?: number | null | undefined;
+    durationMinutes?: number | null | undefined;
+    instructions?: string | null | undefined;
+    status?: ExamPaperStatus | undefined;
+    metadata?: Record<string, unknown> | null | undefined;
+  }): Promise<ExaminationPaper>;
+  getExaminationPaper(id: string, requesterUserId: string): Promise<ExaminationPaper>;
+  listExaminationPapers(courseId: string, requesterUserId: string): Promise<ExaminationPaper[]>;
+  updateExaminationPaper(
+    id: string,
+    requesterUserId: string,
+    updates: Partial<ExaminationPaper>,
+  ): Promise<ExaminationPaper>;
+  deleteExaminationPaper(id: string, requesterUserId: string): Promise<void>;
+
+  // Examination Questions
+  createExaminationQuestions(
+    questions: Array<Omit<ExaminationQuestion, 'id' | 'createdAt' | 'updatedAt'>>,
+  ): Promise<ExaminationQuestion[]>;
+  listQuestionsForPaper(paperId: string, requesterUserId: string): Promise<ExaminationQuestion[]>;
+  listQuestionsForCourse(courseId: string, requesterUserId: string): Promise<ExaminationQuestion[]>;
+  updateExaminationQuestion(
+    id: string,
+    requesterUserId: string,
+    updates: Partial<ExaminationQuestion>,
+  ): Promise<ExaminationQuestion>;
+  deleteExaminationQuestion(id: string, requesterUserId: string): Promise<void>;
+
+  // Practice Assessments
+  createPracticeAssessment(assessment: {
+    userId: string;
+    courseId: string;
+    title: string;
+    format: PracticeAssessmentFormat;
+    blueprintId?: string | null | undefined;
+    totalMarks: number;
+    durationMinutes: number;
+    difficulty: 'easy' | 'medium' | 'hard';
+    status?: PracticeAssessmentStatus | undefined;
+    questions: PracticeQuestion[];
+  }): Promise<PracticeAssessment>;
+  getPracticeAssessment(id: string, requesterUserId: string): Promise<PracticeAssessment>;
+  listPracticeAssessments(courseId: string, requesterUserId: string): Promise<PracticeAssessment[]>;
+  updatePracticeAssessment(
+    id: string,
+    requesterUserId: string,
+    updates: Partial<PracticeAssessment>,
+  ): Promise<PracticeAssessment>;
+
+  // Practice Submissions
+  createPracticeSubmission(sub: {
+    assessmentId: string;
+    userId: string;
+    courseId: string;
+    startedAt?: Date | undefined;
+    submittedAt?: Date | null | undefined;
+    timeSpentSeconds?: number | undefined;
+    answers: Record<string, PracticeStudentAnswer>;
+    diagnosticFeedback?: PracticeDiagnosticReport | null | undefined;
+  }): Promise<PracticeSubmission>;
+  getPracticeSubmission(id: string, requesterUserId: string): Promise<PracticeSubmission>;
+  listPracticeSubmissions(
+    assessmentId: string,
+    requesterUserId: string,
+  ): Promise<PracticeSubmission[]>;
+  updatePracticeSubmission(
+    id: string,
+    requesterUserId: string,
+    updates: Partial<PracticeSubmission>,
+  ): Promise<PracticeSubmission>;
+
+  // AI Usage Records
+  recordAiUsage(
+    record: Omit<AiTaskExecutionRecord, 'id' | 'createdAt'>,
+  ): Promise<AiTaskExecutionRecord>;
+  listAiUsageRecords(userId: string, limit?: number): Promise<AiTaskExecutionRecord[]>;
 }
 
 export class InMemoryDataStore implements DataStore {
@@ -435,6 +569,11 @@ export class InMemoryDataStore implements DataStore {
   private courses: Map<string, Course> = new Map();
   private assessments: Map<string, Assessment> = new Map();
   private assessmentTopics: Map<string, AssessmentTopicLink> = new Map();
+  private examinationPapers: Map<string, ExaminationPaper> = new Map();
+  private examinationQuestions: Map<string, ExaminationQuestion> = new Map();
+  private practiceAssessments: Map<string, PracticeAssessment> = new Map();
+  private practiceSubmissions: Map<string, PracticeSubmission> = new Map();
+  private aiUsageRecords: Map<string, AiTaskExecutionRecord> = new Map();
   private resources: Map<string, Resource> = new Map();
   private chunks: Map<string, ResourceChunk> = new Map();
   private academicNodes: Map<string, AcademicNode> = new Map();
@@ -461,6 +600,9 @@ export class InMemoryDataStore implements DataStore {
   private opportunitySnapshots: Map<string, OpportunitySnapshot> = new Map();
   private modelRegistryEntries: Map<string, ModelRegistryEntry> = new Map();
   private modelCards: Map<string, ModelCard> = new Map();
+  private topicResources: Map<string, TopicResource> = new Map();
+  private studyPlans: Map<string, StudyPlan> = new Map();
+  private studySessions: Map<string, StudySession> = new Map();
   private outboxStore: OutboxStore;
 
   constructor(outboxStore?: OutboxStore) {
@@ -680,6 +822,21 @@ export class InMemoryDataStore implements DataStore {
     for (const [eId, event] of this.studyEvents.entries()) {
       if (event.courseId === course.id) {
         this.studyEvents.delete(eId);
+      }
+    }
+    for (const [trId, tr] of this.topicResources.entries()) {
+      if (tr.courseId === course.id) {
+        this.topicResources.delete(trId);
+      }
+    }
+    for (const [pId, plan] of this.studyPlans.entries()) {
+      if (plan.courseId === course.id) {
+        this.studyPlans.delete(pId);
+      }
+    }
+    for (const [sId, session] of this.studySessions.entries()) {
+      if (session.courseId === course.id) {
+        this.studySessions.delete(sId);
       }
     }
 
@@ -2793,13 +2950,614 @@ export class InMemoryDataStore implements DataStore {
     return this.modelCards.get(modelVersion) ?? null;
   }
 
+  // --- Topic Resources ---
+  async listTopicResources(topicId: string, requesterUserId: string): Promise<TopicResource[]> {
+    if (!isValidUuid(topicId) || !isValidUuid(requesterUserId)) {
+      throw AppError.badRequest('Invalid UUID format.');
+    }
+    const node = this.academicNodes.get(topicId);
+    if (!node) {
+      throw AppError.notFound('Topic node not found.');
+    }
+    assertOwnership(node.userId, requesterUserId, 'AcademicNode');
+
+    return Array.from(this.topicResources.values()).filter(
+      (r) => r.topicId === topicId && r.userId === requesterUserId,
+    );
+  }
+
+  async createTopicResource(
+    data: Omit<TopicResource, 'id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<TopicResource> {
+    if (!isValidUuid(data.topicId) || !isValidUuid(data.courseId) || !isValidUuid(data.userId)) {
+      throw AppError.badRequest('Invalid UUID format.');
+    }
+    const node = this.academicNodes.get(data.topicId);
+    if (!node) {
+      throw AppError.notFound('Topic node not found.');
+    }
+    assertOwnership(node.userId, data.userId, 'AcademicNode');
+
+    const id = crypto.randomUUID();
+    const now = new Date();
+    const record: TopicResource = {
+      ...data,
+      id,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.topicResources.set(id, record);
+    return record;
+  }
+
+  async deleteTopicResource(id: string, requesterUserId: string): Promise<void> {
+    if (!isValidUuid(id) || !isValidUuid(requesterUserId)) {
+      throw AppError.badRequest('Invalid UUID format.');
+    }
+    const resource = this.topicResources.get(id);
+    if (!resource) {
+      throw AppError.notFound('Topic resource not found.');
+    }
+    assertOwnership(resource.userId, requesterUserId, 'TopicResource');
+    this.topicResources.delete(id);
+  }
+
+  // --- Study Plans ---
+  async createStudyPlan(
+    data: Omit<StudyPlan, 'id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<StudyPlan> {
+    if (!isValidUuid(data.userId)) {
+      throw AppError.badRequest('Invalid user ID.');
+    }
+    if (data.courseId && !isValidUuid(data.courseId)) {
+      throw AppError.badRequest('Invalid course ID.');
+    }
+    const id = crypto.randomUUID();
+    const now = new Date();
+    const plan: StudyPlan = {
+      ...data,
+      id,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.studyPlans.set(id, plan);
+    return plan;
+  }
+
+  async getStudyPlan(id: string, requesterUserId: string): Promise<StudyPlan> {
+    if (!isValidUuid(id) || !isValidUuid(requesterUserId)) {
+      throw AppError.badRequest('Invalid UUID format.');
+    }
+    const plan = this.studyPlans.get(id);
+    if (!plan) {
+      throw AppError.notFound('Study plan not found.');
+    }
+    assertOwnership(plan.userId, requesterUserId, 'StudyPlan');
+    return plan;
+  }
+
+  async listStudyPlans(userId: string, courseId?: string): Promise<StudyPlan[]> {
+    if (!isValidUuid(userId)) {
+      throw AppError.badRequest('Invalid user ID.');
+    }
+    return Array.from(this.studyPlans.values()).filter(
+      (p) => p.userId === userId && (!courseId || p.courseId === courseId),
+    );
+  }
+
+  async updateStudyPlan(
+    id: string,
+    requesterUserId: string,
+    updates: Partial<StudyPlan>,
+  ): Promise<StudyPlan> {
+    const plan = await this.getStudyPlan(id, requesterUserId);
+    const updated: StudyPlan = {
+      ...plan,
+      ...updates,
+      updatedAt: new Date(),
+    };
+    this.studyPlans.set(id, updated);
+    return updated;
+  }
+
+  async deleteStudyPlan(id: string, requesterUserId: string): Promise<void> {
+    const plan = await this.getStudyPlan(id, requesterUserId);
+    this.studyPlans.delete(plan.id);
+    for (const [sId, session] of this.studySessions.entries()) {
+      if (session.planId === plan.id) {
+        this.studySessions.delete(sId);
+      }
+    }
+  }
+
+  // --- Study Sessions ---
+  async createStudySessions(
+    sessions: Array<Omit<StudySession, 'id' | 'createdAt' | 'updatedAt'>>,
+  ): Promise<StudySession[]> {
+    const created: StudySession[] = [];
+    const now = new Date();
+    for (const s of sessions) {
+      const id = crypto.randomUUID();
+      const node = this.academicNodes.get(s.topicId);
+      const course = this.courses.get(s.courseId);
+      const session: StudySession = {
+        ...s,
+        id,
+        topicTitle: node?.title,
+        courseCode: course?.code,
+        createdAt: now,
+        updatedAt: now,
+      };
+      this.studySessions.set(id, session);
+      created.push(session);
+    }
+    return created;
+  }
+
+  async listStudySessions(
+    planId: string,
+    requesterUserId: string,
+    range?: { start?: Date; end?: Date },
+  ): Promise<StudySession[]> {
+    await this.getStudyPlan(planId, requesterUserId);
+    return Array.from(this.studySessions.values())
+      .filter((s) => {
+        if (s.planId !== planId || s.userId !== requesterUserId) return false;
+        if (range?.start && s.scheduledDate < range.start) return false;
+        if (range?.end && s.scheduledDate > range.end) return false;
+        return true;
+      })
+      .map((s) => ({
+        ...s,
+        topicTitle: this.academicNodes.get(s.topicId)?.title,
+        courseCode: this.courses.get(s.courseId)?.code,
+      }))
+      .sort((a, b) => a.scheduledDate.getTime() - b.scheduledDate.getTime());
+  }
+
+  async updateStudySession(
+    id: string,
+    requesterUserId: string,
+    updates: Partial<StudySession>,
+  ): Promise<StudySession> {
+    if (!isValidUuid(id) || !isValidUuid(requesterUserId)) {
+      throw AppError.badRequest('Invalid UUID format.');
+    }
+    const session = this.studySessions.get(id);
+    if (!session) {
+      throw AppError.notFound('Study session not found.');
+    }
+    assertOwnership(session.userId, requesterUserId, 'StudySession');
+
+    const updated: StudySession = {
+      ...session,
+      ...updates,
+      updatedAt: new Date(),
+    };
+    this.studySessions.set(id, updated);
+    return updated;
+  }
+
+  async deleteStudySession(id: string, requesterUserId: string): Promise<void> {
+    if (!isValidUuid(id) || !isValidUuid(requesterUserId)) {
+      throw AppError.badRequest('Invalid UUID format.');
+    }
+    const session = this.studySessions.get(id);
+    if (!session) {
+      throw AppError.notFound('Study session not found.');
+    }
+    assertOwnership(session.userId, requesterUserId, 'StudySession');
+    this.studySessions.delete(id);
+  }
+
+  // =====================================================================
+  // Phase 2: Examination Papers & Questions (InMemory)
+  // =====================================================================
+
+  async createExaminationPaper(paper: {
+    userId: string;
+    courseId: string;
+    title: string;
+    resourceId?: string | null | undefined;
+    term?: string | null | undefined;
+    examType?: string | null | undefined;
+    academicYear?: string | null | undefined;
+    totalMarks?: number | null | undefined;
+    durationMinutes?: number | null | undefined;
+    instructions?: string | null | undefined;
+    status?: ExamPaperStatus | undefined;
+    metadata?: Record<string, unknown> | null | undefined;
+  }): Promise<ExaminationPaper> {
+    if (!isValidUuid(paper.userId) || !isValidUuid(paper.courseId)) {
+      throw AppError.badRequest('Invalid UUID format.');
+    }
+    const id = crypto.randomUUID();
+    const created: ExaminationPaper = {
+      id,
+      userId: paper.userId,
+      courseId: paper.courseId,
+      resourceId: paper.resourceId ?? null,
+      title: paper.title,
+      term: paper.term ?? null,
+      examType: paper.examType ?? null,
+      academicYear: paper.academicYear ?? null,
+      totalMarks: paper.totalMarks ?? null,
+      durationMinutes: paper.durationMinutes ?? null,
+      instructions: paper.instructions ?? null,
+      status: paper.status ?? 'pending',
+      metadata: paper.metadata ?? null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    this.examinationPapers.set(id, created);
+    return created;
+  }
+
+  async getExaminationPaper(id: string, requesterUserId: string): Promise<ExaminationPaper> {
+    if (!isValidUuid(id) || !isValidUuid(requesterUserId)) {
+      throw AppError.badRequest('Invalid UUID format.');
+    }
+    const paper = this.examinationPapers.get(id);
+    if (!paper) {
+      throw AppError.notFound('Examination paper not found.');
+    }
+    assertOwnership(paper.userId, requesterUserId, 'ExaminationPaper');
+    const questionCount = Array.from(this.examinationQuestions.values()).filter(
+      (q) => q.paperId === id,
+    ).length;
+    return { ...paper, questionCount };
+  }
+
+  async listExaminationPapers(
+    courseId: string,
+    requesterUserId: string,
+  ): Promise<ExaminationPaper[]> {
+    if (!isValidUuid(courseId) || !isValidUuid(requesterUserId)) {
+      throw AppError.badRequest('Invalid UUID format.');
+    }
+    return Array.from(this.examinationPapers.values())
+      .filter((p) => p.courseId === courseId && p.userId === requesterUserId)
+      .map((p) => {
+        const questionCount = Array.from(this.examinationQuestions.values()).filter(
+          (q) => q.paperId === p.id,
+        ).length;
+        return { ...p, questionCount };
+      })
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+  }
+
+  async updateExaminationPaper(
+    id: string,
+    requesterUserId: string,
+    updates: Partial<ExaminationPaper>,
+  ): Promise<ExaminationPaper> {
+    if (!isValidUuid(id) || !isValidUuid(requesterUserId)) {
+      throw AppError.badRequest('Invalid UUID format.');
+    }
+    const paper = this.examinationPapers.get(id);
+    if (!paper) {
+      throw AppError.notFound('Examination paper not found.');
+    }
+    assertOwnership(paper.userId, requesterUserId, 'ExaminationPaper');
+    const updated: ExaminationPaper = {
+      ...paper,
+      ...updates,
+      updatedAt: new Date(),
+    };
+    this.examinationPapers.set(id, updated);
+    return updated;
+  }
+
+  async deleteExaminationPaper(id: string, requesterUserId: string): Promise<void> {
+    if (!isValidUuid(id) || !isValidUuid(requesterUserId)) {
+      throw AppError.badRequest('Invalid UUID format.');
+    }
+    const paper = this.examinationPapers.get(id);
+    if (!paper) {
+      throw AppError.notFound('Examination paper not found.');
+    }
+    assertOwnership(paper.userId, requesterUserId, 'ExaminationPaper');
+    this.examinationPapers.delete(id);
+    // Cascade delete questions
+    for (const [qId, q] of Array.from(this.examinationQuestions.entries())) {
+      if (q.paperId === id) {
+        this.examinationQuestions.delete(qId);
+      }
+    }
+  }
+
+  async createExaminationQuestions(
+    questions: Array<Omit<ExaminationQuestion, 'id' | 'createdAt' | 'updatedAt'>>,
+  ): Promise<ExaminationQuestion[]> {
+    const created: ExaminationQuestion[] = [];
+    for (const q of questions) {
+      const id = crypto.randomUUID();
+      const question: ExaminationQuestion = {
+        ...q,
+        id,
+        candidateTopics: q.candidateTopics || [],
+        compulsory: q.compulsory ?? true,
+        difficulty: q.difficulty || 'medium',
+        difficultyUncertainty: q.difficultyUncertainty ?? 0.2,
+        verificationStatus: q.verificationStatus || 'extracted',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+      this.examinationQuestions.set(id, question);
+      created.push(question);
+    }
+    return created;
+  }
+
+  async listQuestionsForPaper(
+    paperId: string,
+    requesterUserId: string,
+  ): Promise<ExaminationQuestion[]> {
+    if (!isValidUuid(paperId) || !isValidUuid(requesterUserId)) {
+      throw AppError.badRequest('Invalid UUID format.');
+    }
+    return Array.from(this.examinationQuestions.values())
+      .filter((q) => q.paperId === paperId && q.userId === requesterUserId)
+      .map((q) => {
+        const topic = q.topicId ? this.academicNodes.get(q.topicId) : undefined;
+        return { ...q, topicTitle: topic?.title };
+      })
+      .sort((a, b) =>
+        a.questionNumber.localeCompare(b.questionNumber, undefined, { numeric: true }),
+      );
+  }
+
+  async listQuestionsForCourse(
+    courseId: string,
+    requesterUserId: string,
+  ): Promise<ExaminationQuestion[]> {
+    if (!isValidUuid(courseId) || !isValidUuid(requesterUserId)) {
+      throw AppError.badRequest('Invalid UUID format.');
+    }
+    return Array.from(this.examinationQuestions.values())
+      .filter((q) => q.courseId === courseId && q.userId === requesterUserId)
+      .map((q) => {
+        const topic = q.topicId ? this.academicNodes.get(q.topicId) : undefined;
+        return { ...q, topicTitle: topic?.title };
+      });
+  }
+
+  async updateExaminationQuestion(
+    id: string,
+    requesterUserId: string,
+    updates: Partial<ExaminationQuestion>,
+  ): Promise<ExaminationQuestion> {
+    if (!isValidUuid(id) || !isValidUuid(requesterUserId)) {
+      throw AppError.badRequest('Invalid UUID format.');
+    }
+    const q = this.examinationQuestions.get(id);
+    if (!q) {
+      throw AppError.notFound('Examination question not found.');
+    }
+    assertOwnership(q.userId, requesterUserId, 'ExaminationQuestion');
+    const updated: ExaminationQuestion = {
+      ...q,
+      ...updates,
+      updatedAt: new Date(),
+    };
+    this.examinationQuestions.set(id, updated);
+    return updated;
+  }
+
+  async deleteExaminationQuestion(id: string, requesterUserId: string): Promise<void> {
+    if (!isValidUuid(id) || !isValidUuid(requesterUserId)) {
+      throw AppError.badRequest('Invalid UUID format.');
+    }
+    const q = this.examinationQuestions.get(id);
+    if (!q) {
+      throw AppError.notFound('Examination question not found.');
+    }
+    assertOwnership(q.userId, requesterUserId, 'ExaminationQuestion');
+    this.examinationQuestions.delete(id);
+  }
+
+  // =====================================================================
+  // Phase 2: Practice Assessments & Submissions (InMemory)
+  // =====================================================================
+
+  async createPracticeAssessment(assessment: {
+    userId: string;
+    courseId: string;
+    title: string;
+    format: PracticeAssessmentFormat;
+    blueprintId?: string | null | undefined;
+    totalMarks: number;
+    durationMinutes: number;
+    difficulty: 'easy' | 'medium' | 'hard';
+    status?: PracticeAssessmentStatus | undefined;
+    questions: PracticeQuestion[];
+  }): Promise<PracticeAssessment> {
+    if (!isValidUuid(assessment.userId) || !isValidUuid(assessment.courseId)) {
+      throw AppError.badRequest('Invalid UUID format.');
+    }
+    const id = crypto.randomUUID();
+    const created: PracticeAssessment = {
+      id,
+      userId: assessment.userId,
+      courseId: assessment.courseId,
+      title: assessment.title,
+      format: assessment.format,
+      blueprintId: assessment.blueprintId ?? null,
+      totalMarks: assessment.totalMarks,
+      durationMinutes: assessment.durationMinutes,
+      difficulty: assessment.difficulty,
+      status: assessment.status ?? 'ready',
+      questions: assessment.questions,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    this.practiceAssessments.set(id, created);
+    return created;
+  }
+
+  async getPracticeAssessment(id: string, requesterUserId: string): Promise<PracticeAssessment> {
+    if (!isValidUuid(id) || !isValidUuid(requesterUserId)) {
+      throw AppError.badRequest('Invalid UUID format.');
+    }
+    const assessment = this.practiceAssessments.get(id);
+    if (!assessment) {
+      throw AppError.notFound('Practice assessment not found.');
+    }
+    assertOwnership(assessment.userId, requesterUserId, 'PracticeAssessment');
+    return assessment;
+  }
+
+  async listPracticeAssessments(
+    courseId: string,
+    requesterUserId: string,
+  ): Promise<PracticeAssessment[]> {
+    if (!isValidUuid(courseId) || !isValidUuid(requesterUserId)) {
+      throw AppError.badRequest('Invalid UUID format.');
+    }
+    return Array.from(this.practiceAssessments.values())
+      .filter((a) => a.courseId === courseId && a.userId === requesterUserId)
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+  }
+
+  async updatePracticeAssessment(
+    id: string,
+    requesterUserId: string,
+    updates: Partial<PracticeAssessment>,
+  ): Promise<PracticeAssessment> {
+    if (!isValidUuid(id) || !isValidUuid(requesterUserId)) {
+      throw AppError.badRequest('Invalid UUID format.');
+    }
+    const assessment = this.practiceAssessments.get(id);
+    if (!assessment) {
+      throw AppError.notFound('Practice assessment not found.');
+    }
+    assertOwnership(assessment.userId, requesterUserId, 'PracticeAssessment');
+    const updated: PracticeAssessment = {
+      ...assessment,
+      ...updates,
+      updatedAt: new Date(),
+    };
+    this.practiceAssessments.set(id, updated);
+    return updated;
+  }
+
+  async createPracticeSubmission(sub: {
+    assessmentId: string;
+    userId: string;
+    courseId: string;
+    startedAt?: Date | undefined;
+    submittedAt?: Date | null | undefined;
+    timeSpentSeconds?: number | undefined;
+    answers: Record<string, PracticeStudentAnswer>;
+    diagnosticFeedback?: PracticeDiagnosticReport | null | undefined;
+  }): Promise<PracticeSubmission> {
+    if (!isValidUuid(sub.assessmentId) || !isValidUuid(sub.userId) || !isValidUuid(sub.courseId)) {
+      throw AppError.badRequest('Invalid UUID format.');
+    }
+    const id = crypto.randomUUID();
+    const created: PracticeSubmission = {
+      id,
+      assessmentId: sub.assessmentId,
+      userId: sub.userId,
+      courseId: sub.courseId,
+      startedAt: sub.startedAt || new Date(),
+      submittedAt: sub.submittedAt ?? null,
+      timeSpentSeconds: sub.timeSpentSeconds || 0,
+      answers: sub.answers,
+      diagnosticFeedback: sub.diagnosticFeedback ?? null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    this.practiceSubmissions.set(id, created);
+    return created;
+  }
+
+  async getPracticeSubmission(id: string, requesterUserId: string): Promise<PracticeSubmission> {
+    if (!isValidUuid(id) || !isValidUuid(requesterUserId)) {
+      throw AppError.badRequest('Invalid UUID format.');
+    }
+    const sub = this.practiceSubmissions.get(id);
+    if (!sub) {
+      throw AppError.notFound('Practice submission not found.');
+    }
+    assertOwnership(sub.userId, requesterUserId, 'PracticeSubmission');
+    return sub;
+  }
+
+  async listPracticeSubmissions(
+    assessmentId: string,
+    requesterUserId: string,
+  ): Promise<PracticeSubmission[]> {
+    if (!isValidUuid(assessmentId) || !isValidUuid(requesterUserId)) {
+      throw AppError.badRequest('Invalid UUID format.');
+    }
+    return Array.from(this.practiceSubmissions.values())
+      .filter((s) => s.assessmentId === assessmentId && s.userId === requesterUserId)
+      .sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime());
+  }
+
+  async updatePracticeSubmission(
+    id: string,
+    requesterUserId: string,
+    updates: Partial<PracticeSubmission>,
+  ): Promise<PracticeSubmission> {
+    if (!isValidUuid(id) || !isValidUuid(requesterUserId)) {
+      throw AppError.badRequest('Invalid UUID format.');
+    }
+    const sub = this.practiceSubmissions.get(id);
+    if (!sub) {
+      throw AppError.notFound('Practice submission not found.');
+    }
+    assertOwnership(sub.userId, requesterUserId, 'PracticeSubmission');
+    const updated: PracticeSubmission = {
+      ...sub,
+      ...updates,
+      updatedAt: new Date(),
+    };
+    this.practiceSubmissions.set(id, updated);
+    return updated;
+  }
+
+  // =====================================================================
+  // Phase 2: AI Usage Records (InMemory)
+  // =====================================================================
+
+  async recordAiUsage(
+    record: Omit<AiTaskExecutionRecord, 'id' | 'createdAt'>,
+  ): Promise<AiTaskExecutionRecord> {
+    const id = crypto.randomUUID();
+    const created: AiTaskExecutionRecord = {
+      ...record,
+      id,
+      createdAt: new Date(),
+    };
+    this.aiUsageRecords.set(id, created);
+    return created;
+  }
+
+  async listAiUsageRecords(userId: string, limit = 50): Promise<AiTaskExecutionRecord[]> {
+    return Array.from(this.aiUsageRecords.values())
+      .filter((r) => r.userId === userId)
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      .slice(0, limit);
+  }
+
   clear(): void {
     this.users.clear();
     this.courses.clear();
     this.assessments.clear();
+    this.assessmentTopics.clear();
+    this.examinationPapers.clear();
+    this.examinationQuestions.clear();
+    this.practiceAssessments.clear();
+    this.practiceSubmissions.clear();
+    this.aiUsageRecords.clear();
     this.resources.clear();
     this.chunks.clear();
     this.academicNodes.clear();
+    this.topicResources.clear();
+    this.studyPlans.clear();
+    this.studySessions.clear();
     this.companies.clear();
     this.skills.clear();
     this.opportunities.clear();

@@ -1,17 +1,29 @@
 'use client';
 
-import React from 'react';
+import React, { useState } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { BookOpen, Search, Calendar, Cpu, CheckCircle, Briefcase } from 'lucide-react';
+import {
+  BookOpen,
+  Search,
+  Calendar,
+  Cpu,
+  CheckCircle,
+  Briefcase,
+  CalendarCheck,
+  Menu,
+  X,
+} from 'lucide-react';
 import { SignedIn, SignedOut, UserButton, SignInButton } from '@clerk/nextjs';
 
 export function Navbar() {
   const pathname = usePathname();
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   const navLinks = [
     { href: '/', label: 'Today', icon: Calendar },
     { href: '/courses', label: 'Courses', icon: BookOpen },
+    { href: '/planner', label: 'Planner', icon: CalendarCheck },
     { href: '/search', label: 'Search', icon: Search },
     { href: '/opportunities', label: 'Opportunities', icon: Briefcase },
   ];
@@ -38,7 +50,7 @@ export function Navbar() {
             </div>
           </Link>
 
-          {/* Navigation Links */}
+          {/* Desktop Navigation Links */}
           <nav className="hidden md:flex items-center space-x-1 pl-4 border-l border-[var(--cf-border)]">
             {navLinks.map((link) => {
               const Icon = link.icon;
@@ -62,9 +74,9 @@ export function Navbar() {
           </nav>
         </div>
 
-        {/* Right Status Indicator & Clerk Auth */}
+        {/* Right Status Indicator, Auth, & Mobile Hamburger */}
         <div className="flex items-center space-x-3">
-          <div className="flex items-center space-x-2 px-2.5 py-1 rounded-full bg-emerald-950/40 border border-emerald-800/40 text-emerald-400 text-[11px] font-mono">
+          <div className="hidden sm:flex items-center space-x-2 px-2.5 py-1 rounded-full bg-emerald-950/40 border border-emerald-800/40 text-emerald-400 text-[11px] font-mono">
             <CheckCircle className="w-3 h-3 text-emerald-400" />
             <span>Second Brain Active</span>
           </div>
@@ -88,8 +100,44 @@ export function Navbar() {
               </button>
             </SignInButton>
           </SignedOut>
+
+          {/* Mobile Menu Toggle Button */}
+          <button
+            type="button"
+            onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+            className="md:hidden p-2 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-bg-surface-2)] text-[var(--cf-text-secondary)] hover:text-white transition-colors focus:outline-none"
+            aria-label="Toggle navigation menu"
+            aria-expanded={mobileMenuOpen}
+          >
+            {mobileMenuOpen ? <X className="w-4 h-4" /> : <Menu className="w-4 h-4" />}
+          </button>
         </div>
       </div>
+
+      {/* Mobile Navigation Dropdown */}
+      {mobileMenuOpen && (
+        <div className="md:hidden border-t border-[var(--cf-border)] bg-[var(--cf-bg-surface-1)] px-4 py-3 space-y-1 animate-in slide-in-from-top-2 duration-150">
+          {navLinks.map((link) => {
+            const Icon = link.icon;
+            const isActive = link.href === '/' ? pathname === '/' : pathname.startsWith(link.href);
+            return (
+              <Link
+                key={link.href}
+                href={link.href}
+                onClick={() => setMobileMenuOpen(false)}
+                className={`flex items-center space-x-2.5 px-3 py-2 rounded-lg text-xs font-medium transition-colors ${
+                  isActive
+                    ? 'bg-[var(--cf-bg-surface-2)] text-white font-semibold border border-[var(--cf-border)]'
+                    : 'text-[var(--cf-text-secondary)] hover:text-white hover:bg-[var(--cf-bg-surface-2)]/50'
+                }`}
+              >
+                <Icon className="w-4 h-4 text-[var(--cf-primary)]" />
+                <span>{link.label}</span>
+              </Link>
+            );
+          })}
+        </div>
+      )}
     </header>
   );
 }

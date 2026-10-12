@@ -18,8 +18,18 @@ import {
   GraduationCap,
   Layers,
   BookMarked,
+  Sparkles,
 } from 'lucide-react';
+import { useAuth, SignInButton } from '@clerk/nextjs';
 import { fetchTodayOverview, updateTopicStudyState } from '@/lib/api';
+import {
+  formatTodayHeader,
+  formatShortDate,
+  formatRelativeTime as formatRelativeTimeUtil,
+  DEFAULT_TIMEZONE,
+} from '@/lib/date';
+import { LearningUniverseVisualizer } from '@/components/LearningUniverseVisualizer';
+import { SyllabusImportModal } from '@/components/SyllabusImportModal';
 import type { TodayOverviewResponse, TodayAssessmentItem } from '@campusflow/types';
 
 interface FocusItem {
@@ -34,6 +44,7 @@ interface FocusItem {
 }
 
 export default function TodayPage() {
+  const { isLoaded, isSignedIn, getToken } = useAuth();
   const [data, setData] = useState<TodayOverviewResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -42,12 +53,41 @@ export default function TodayPage() {
   const [assessmentFilter, setAssessmentFilter] = useState<
     'all' | 'pending' | 'overdue' | 'unscheduled' | 'completed'
   >('pending');
+  const [showImportModal, setShowImportModal] = useState(false);
+  // Deterministic initial timezone matching server SSR fallback
+  const [userTimezone, setUserTimezone] = useState<string>(DEFAULT_TIMEZONE);
+
+  // Sync with browser timezone after mount to preserve hydration symmetry
+  useEffect(() => {
+    try {
+      const browserTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      if (browserTz) {
+        setUserTimezone(browserTz);
+      }
+    } catch {
+      // Keep DEFAULT_TIMEZONE fallback
+    }
+  }, []);
 
   const loadData = useCallback(async () => {
+    if (!isLoaded) return;
+
+    if (!isSignedIn) {
+      setLoading(false);
+      setData(null);
+      setError(null);
+      return;
+    }
+
     setLoading(true);
     setError(null);
     try {
-      const res = await fetchTodayOverview();
+      const tz =
+        typeof Intl !== 'undefined'
+          ? Intl.DateTimeFormat().resolvedOptions().timeZone || DEFAULT_TIMEZONE
+          : DEFAULT_TIMEZONE;
+      const token = await getToken({ skipCache: true }).catch(() => null);
+      const res = await fetchTodayOverview(tz, token);
       if (!res) {
         setError('Unable to load academic dashboard. Verify network and authentication.');
       } else {
@@ -58,18 +98,21 @@ export default function TodayPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [isLoaded, isSignedIn, getToken]);
 
   useEffect(() => {
-    loadData();
-  }, [loadData]);
+    if (isLoaded) {
+      loadData();
+    }
+  }, [isLoaded, isSignedIn, loadData]);
 
   const handleMarkReviewed = async (courseId: string, topicId: string) => {
     setMutatingTopicId(topicId);
     setActionError(null);
     try {
       await updateTopicStudyState(courseId, topicId, 'reviewed', 'reviewed');
-      const updated = await fetchTodayOverview();
+      const token = await getToken().catch(() => null);
+      const updated = await fetchTodayOverview(userTimezone, token);
       if (updated) {
         setData(updated);
       }
@@ -80,32 +123,19 @@ export default function TodayPage() {
     }
   };
 
-  const formatDate = (date: string | Date | null | undefined): string => {
-    if (!date) return 'No date set';
-    const d = new Date(date);
-    if (isNaN(d.getTime())) return 'Invalid date';
-    return d.toLocaleDateString(undefined, {
-      month: 'short',
-      day: 'numeric',
-      year: 'numeric',
-    });
-  };
+  const formatDate = useCallback(
+    (date: string | Date | null | undefined): string => {
+      return formatShortDate(date, userTimezone);
+    },
+    [userTimezone],
+  );
 
-  const formatRelativeTime = (date: string | Date | null | undefined): string => {
-    if (!date) return 'Never';
-    const d = new Date(date);
-    if (isNaN(d.getTime())) return 'Never';
-    const now = Date.now();
-    const diffSec = Math.floor((now - d.getTime()) / 1000);
-    if (diffSec < 60) return 'Just now';
-    const diffMin = Math.floor(diffSec / 60);
-    if (diffMin < 60) return `${diffMin}m ago`;
-    const diffHr = Math.floor(diffMin / 60);
-    if (diffHr < 24) return `${diffHr}h ago`;
-    const diffDays = Math.floor(diffHr / 24);
-    if (diffDays < 7) return `${diffDays}d ago`;
-    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-  };
+  const formatRelativeTime = useCallback(
+    (date: string | Date | null | undefined): string => {
+      return formatRelativeTimeUtil(date, userTimezone);
+    },
+    [userTimezone],
+  );
 
   // Deterministic, transparent priorities derived from real persisted data
   const focusItems = useMemo<FocusItem[]>(() => {
@@ -210,16 +240,11 @@ export default function TodayPage() {
   }, [data, assessmentFilter]);
 
   const todayDateFormatted = useMemo(() => {
-    return new Date().toLocaleDateString(undefined, {
-      weekday: 'long',
-      month: 'long',
-      day: 'numeric',
-      year: 'numeric',
-    });
-  }, []);
+    return formatTodayHeader(new Date(), userTimezone);
+  }, [userTimezone]);
 
   return (
-    <main className="space-y-8 pb-12 max-w-7xl mx-auto px-4 sm:px-6">
+    <div className="space-y-8 pb-12">
       {/* Top Header & Context Bar */}
       <header className="border border-[var(--cf-border)] rounded-xl bg-[var(--cf-bg-surface-1)] p-6 sm:p-8">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -237,6 +262,14 @@ export default function TodayPage() {
             </p>
           </div>
           <div className="flex items-center gap-2 self-start md:self-auto">
+            <button
+              onClick={() => setShowImportModal(true)}
+              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-mono rounded-lg border border-sky-500/30 bg-sky-950/30 text-sky-300 hover:text-white hover:bg-sky-900/40 transition-colors shadow-sm"
+              aria-label="Import syllabus PDF to generate structured course"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-sky-400" />
+              <span>Import Syllabus</span>
+            </button>
             <button
               onClick={loadData}
               disabled={loading}
@@ -360,6 +393,30 @@ export default function TodayPage() {
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             <div className="lg:col-span-2 h-96 bg-[var(--cf-bg-surface-1)] rounded-xl border border-[var(--cf-border)]" />
             <div className="h-96 bg-[var(--cf-bg-surface-1)] rounded-xl border border-[var(--cf-border)]" />
+          </div>
+        </div>
+      )}
+
+      {/* Signed Out State */}
+      {isLoaded && !isSignedIn && !loading && (
+        <div className="p-8 sm:p-12 rounded-xl border border-[var(--cf-border)] bg-[var(--cf-bg-surface-1)] text-center space-y-4 max-w-xl mx-auto shadow-sm">
+          <div className="w-12 h-12 rounded-full bg-[var(--cf-bg-surface-2)] border border-[var(--cf-border)] flex items-center justify-center mx-auto text-[var(--cf-accent-primary)]">
+            <Target className="w-6 h-6" />
+          </div>
+          <h2 className="text-lg font-semibold text-white">Student Sign-In Required</h2>
+          <p className="text-xs text-[var(--cf-text-secondary)] leading-relaxed">
+            Your personal academic operating system requires an authenticated session to compute
+            today&apos;s actionable priorities, deadline tracking, and active coursework state.
+          </p>
+          <div className="pt-2">
+            <SignInButton mode="modal">
+              <button
+                type="button"
+                className="px-5 py-2.5 rounded-lg text-xs font-medium bg-[var(--cf-primary)] text-white hover:bg-[var(--cf-primary)]/90 transition-colors shadow-sm"
+              >
+                Sign In to CampusFlow
+              </button>
+            </SignInButton>
           </div>
         </div>
       )}
@@ -781,8 +838,38 @@ export default function TodayPage() {
               </section>
             </div>
           </div>
+
+          {/* SECTION D: 3D LEARNING UNIVERSE EXPLORATION */}
+          {data.courses && data.courses.length > 0 && (
+            <section aria-labelledby="learning-universe-heading" className="pt-2">
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                  <Sparkles className="w-4 h-4 text-sky-400" />
+                  <h2
+                    id="learning-universe-heading"
+                    className="text-sm font-semibold uppercase tracking-wider text-[var(--cf-text-secondary)] font-mono"
+                  >
+                    Learning Space & Celestial Orbit
+                  </h2>
+                </div>
+                <span className="text-[11px] text-[var(--cf-text-muted)] font-mono">
+                  Interactive Exploration
+                </span>
+              </div>
+              <LearningUniverseVisualizer courses={data.courses} />
+            </section>
+          )}
         </div>
       )}
-    </main>
+
+      <SyllabusImportModal
+        isOpen={showImportModal}
+        onClose={() => setShowImportModal(false)}
+        onCourseCreated={() => {
+          setShowImportModal(false);
+          loadData();
+        }}
+      />
+    </div>
   );
 }

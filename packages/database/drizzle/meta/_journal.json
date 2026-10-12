@@ -50,6 +50,20 @@
       "when": 1791565129844,
       "tag": "0006_violet_jane_foster",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1791699161100,
+      "tag": "0007_third_sersi",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1791699162000,
+      "tag": "0008_examination_intelligence",
+      "breakpoints": true
     }
   ]
 }

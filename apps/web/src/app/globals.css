@@ -5,6 +5,7 @@
 :root {
   /* CampusFlow Design System Tokens */
   --cf-bg-base: #0a0d12;
+  --cf-bg-surface-0: #0a0d12;
   --cf-bg-surface-1: #12161f;
   --cf-bg-surface-2: #1b212d;
   --cf-bg-surface-hover: #232b3a;
@@ -13,6 +14,8 @@
   --cf-text-secondary: #94a3b8;
   --cf-text-muted: #64748b;
 
+  --cf-primary: #2563eb;
+  --cf-primary-hover: #1d4ed8;
   --cf-accent-primary: #2563eb;
   --cf-accent-hover: #1d4ed8;
 

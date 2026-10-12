@@ -2,14 +2,24 @@
 
 import React, { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { BookOpen, Plus, ArrowRight, Layers, CheckCircle2, AlertCircle } from 'lucide-react';
+import {
+  BookOpen,
+  Plus,
+  ArrowRight,
+  Layers,
+  CheckCircle2,
+  AlertCircle,
+  Sparkles,
+} from 'lucide-react';
 import { fetchCourses, createCourse } from '@/lib/api';
+import { SyllabusImportModal } from '@/components/SyllabusImportModal';
 import type { Course } from '@campusflow/types';
 
 export default function CoursesPage() {
   const [courses, setCourses] = useState<Course[]>([]);
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
+  const [showImportModal, setShowImportModal] = useState(false);
   const [code, setCode] = useState('');
   const [title, setTitle] = useState('');
   const [term, setTerm] = useState('Fall 2026');
@@ -71,13 +81,22 @@ export default function CoursesPage() {
             Registered courses and curriculum structures in your Second Brain.
           </p>
         </div>
-        <button
-          onClick={() => setShowModal(true)}
-          className="inline-flex items-center space-x-2 px-3.5 py-2 rounded-lg bg-[var(--cf-primary)] hover:bg-[var(--cf-primary)]/90 text-white text-xs font-medium transition-colors shadow-sm self-start sm:self-auto"
-        >
-          <Plus className="w-4 h-4" />
-          <span>Add Course</span>
-        </button>
+        <div className="flex items-center gap-2 self-start sm:self-auto">
+          <button
+            onClick={() => setShowImportModal(true)}
+            className="inline-flex items-center space-x-2 px-3.5 py-2 rounded-lg bg-[var(--cf-primary)] hover:bg-[var(--cf-primary)]/90 text-white text-xs font-semibold shadow-sm transition-colors"
+          >
+            <Sparkles className="w-4 h-4" />
+            <span>Import Syllabus PDF</span>
+          </button>
+          <button
+            onClick={() => setShowModal(true)}
+            className="inline-flex items-center space-x-1.5 px-3 py-2 rounded-lg bg-[var(--cf-bg-surface-2)] hover:bg-[var(--cf-border)] border border-[var(--cf-border)] text-white text-xs font-medium transition-colors"
+          >
+            <Plus className="w-4 h-4" />
+            <span>Manual Add</span>
+          </button>
+        </div>
       </div>
 
       {error && (
@@ -213,6 +232,16 @@ export default function CoursesPage() {
           </div>
         </div>
       )}
+
+      {/* Syllabus Import Modal */}
+      <SyllabusImportModal
+        isOpen={showImportModal}
+        onClose={() => setShowImportModal(false)}
+        onCourseCreated={() => {
+          setShowImportModal(false);
+          loadData();
+        }}
+      />
     </div>
   );
 }

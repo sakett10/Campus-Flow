@@ -33,67 +33,98 @@ async function withTimeout<T>(
  * Extracts page-by-page text from PDF bytes using unpdf (PDF.js).
  */
 export async function extractPdfText(buffer: Buffer): Promise<DocumentExtractionResult> {
-  const uint8 = new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+  // Isolate buffer slice so transferring to PDF.js worker does not detach the caller's buffer
+  const isolatedBytes = new Uint8Array(
+    buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength),
+  );
 
   // 1. Inspect PDF metadata & page count
-  const pdfDoc = await withTimeout(
-    getDocumentProxy(uint8),
-    INGESTION_LIMITS.EXTRACTION_TIMEOUT_MS,
-    'PDF document inspection',
-  );
-
-  const pageCount = pdfDoc.numPages;
-
-  if (pageCount > INGESTION_LIMITS.MAX_PDF_PAGES) {
-    throw AppError.badRequest(
-      `PDF page count (${pageCount}) exceeds maximum allowed limit of ${INGESTION_LIMITS.MAX_PDF_PAGES} pages.`,
+  let pdfDoc: Awaited<ReturnType<typeof getDocumentProxy>>;
+  try {
+    pdfDoc = await withTimeout(
+      getDocumentProxy(isolatedBytes),
+      INGESTION_LIMITS.EXTRACTION_TIMEOUT_MS,
+      'PDF document inspection',
     );
-  }
-
-  // 2. Extract page-by-page text
-  const extraction = await withTimeout(
-    extractText(uint8, { mergePages: false }),
-    INGESTION_LIMITS.EXTRACTION_TIMEOUT_MS,
-    'PDF text extraction',
-  );
-
-  const rawPages: string[] = Array.isArray(extraction.text) ? extraction.text : [extraction.text];
-
-  const pages: ExtractedPage[] = [];
-  let fullText = '';
-  let totalExtractedChars = 0;
-
-  for (let i = 0; i < rawPages.length; i++) {
-    const pageText = rawPages[i] || '';
-    const cleanText = pageText.trim();
-    totalExtractedChars += cleanText.length;
-
-    pages.push({
-      pageNumber: i + 1,
-      text: pageText,
-      charCount: pageText.length,
-    });
-
-    if (fullText.length > 0 && pageText.length > 0) {
-      fullText += '\n\n';
+  } catch (err: unknown) {
+    if (err instanceof AppError) {
+      throw err;
     }
-    fullText += pageText;
+    const errMsg = err instanceof Error ? err.message : String(err);
+    if (
+      errMsg.includes('Invalid PDF structure') ||
+      errMsg.includes('InvalidPDFException') ||
+      errMsg.includes('Invalid PDF') ||
+      errMsg.includes('Missing PDF header')
+    ) {
+      throw AppError.badRequest('Invalid or corrupt PDF document structure.');
+    }
+    if (errMsg.toLowerCase().includes('password')) {
+      throw AppError.badRequest('Password-protected PDFs cannot be extracted.');
+    }
+    throw AppError.badRequest(`Failed to read PDF document: ${errMsg}`);
   }
 
-  // Detect image-only or scanned PDFs with no selectable text
-  const hasExtractableText = totalExtractedChars >= 20;
+  try {
+    const pageCount = pdfDoc.numPages;
 
-  return {
-    text: fullText,
-    pages,
-    pageCount,
-    extractionVersion: EXTRACTION_VERSION,
-    hasExtractableText,
-    metadata: {
+    if (pageCount > INGESTION_LIMITS.MAX_PDF_PAGES) {
+      throw AppError.badRequest(
+        `PDF page count (${pageCount}) exceeds maximum allowed limit of ${INGESTION_LIMITS.MAX_PDF_PAGES} pages.`,
+      );
+    }
+
+    // 2. Extract page-by-page text using the already-resolved PDFDocumentProxy
+    const extraction = await withTimeout(
+      extractText(pdfDoc, { mergePages: false }),
+      INGESTION_LIMITS.EXTRACTION_TIMEOUT_MS,
+      'PDF text extraction',
+    );
+
+    const rawPages: string[] = Array.isArray(extraction.text) ? extraction.text : [extraction.text];
+
+    const pages: ExtractedPage[] = [];
+    let fullText = '';
+    let totalExtractedChars = 0;
+
+    for (let i = 0; i < rawPages.length; i++) {
+      const pageText = rawPages[i] || '';
+      const cleanText = pageText.trim();
+      totalExtractedChars += cleanText.length;
+
+      pages.push({
+        pageNumber: i + 1,
+        text: pageText,
+        charCount: pageText.length,
+      });
+
+      if (fullText.length > 0 && pageText.length > 0) {
+        fullText += '\n\n';
+      }
+      fullText += pageText;
+    }
+
+    // Detect image-only or scanned PDFs with no selectable text
+    const hasExtractableText = totalExtractedChars >= 20;
+
+    return {
+      text: fullText,
+      pages,
       pageCount,
-      totalChars: totalExtractedChars,
-    },
-  };
+      extractionVersion: EXTRACTION_VERSION,
+      hasExtractableText,
+      metadata: {
+        pageCount,
+        totalChars: totalExtractedChars,
+      },
+    };
+  } finally {
+    try {
+      await pdfDoc.loadingTask.destroy();
+    } catch {
+      // Ignore cleanup error if already destroyed
+    }
+  }
 }
 
 /**

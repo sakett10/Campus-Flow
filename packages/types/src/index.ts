@@ -148,6 +148,10 @@ export interface AcademicNode {
   origin: NodeOrigin;
   confidence?: number | null | undefined;
   needsReview: 'yes' | 'no';
+  estimatedMinutes?: number | null | undefined;
+  learningObjectives?: string[] | null | undefined;
+  prerequisites?: string[] | null | undefined;
+  notes?: string | null | undefined;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -301,7 +305,21 @@ export interface ChunkingOptions {
 // ==========================================
 
 export type AiTaskType =
-  'extraction' | 'reasoning' | 'generation' | 'classification' | 'agent_orchestration';
+  | 'extraction'
+  | 'reasoning'
+  | 'generation'
+  | 'classification'
+  | 'agent_orchestration'
+  | 'academic_document_analysis'
+  | 'exam_question_extraction'
+  | 'syllabus_to_question_mapping'
+  | 'question_generation'
+  | 'solution_generation'
+  | 'short_answer_evaluation'
+  | 'topic_explanation'
+  | 'study_recommendations'
+  | 'coding_assistance'
+  | 'opportunity_skill_analysis';
 
 export interface AiExtractionRequest {
   systemPrompt?: string;
@@ -1887,4 +1905,422 @@ export interface PredictionTransparencyRecord {
   knownLimitations: string[];
   unobservedFactors: string[];
   modelCard: ModelCard | null;
+}
+
+// ==========================================
+// Learning Universe: Syllabus Extraction Types
+// ==========================================
+
+export interface SyllabusExtractionTopic {
+  title: string;
+  orderIndex: number;
+  description?: string | null | undefined;
+  estimatedMinutes?: number | null | undefined;
+  prerequisites?: string[] | undefined;
+  pageReferences?: string | null | undefined;
+  subtopics?: string[] | undefined;
+}
+
+export interface SyllabusExtractionModule {
+  title: string;
+  type: 'module' | 'chapter';
+  orderIndex: number;
+  description?: string | null | undefined;
+  teachingHours?: number | null | undefined;
+  learningObjectives?: string[] | undefined;
+  topics: SyllabusExtractionTopic[];
+}
+
+export interface SyllabusExtractionAssessment {
+  title: string;
+  type: AssessmentType;
+  date?: string | null | undefined;
+  weightage?: string | null | undefined;
+  totalMarks?: number | null | undefined;
+  associatedTopics?: string[] | undefined;
+}
+
+export interface SyllabusPrescribedTextbook {
+  title: string;
+  author?: string | null | undefined;
+  edition?: string | null | undefined;
+  isPrimary?: boolean | undefined;
+}
+
+export interface SyllabusExtractedCourse {
+  code: string;
+  title: string;
+  term?: string | null | undefined;
+  prerequisites?: string[] | undefined;
+  prescribedTextbooks?: SyllabusPrescribedTextbook[] | undefined;
+  modules: SyllabusExtractionModule[];
+  assessments: SyllabusExtractionAssessment[];
+  confidence: number;
+  unclearFields?: string[] | undefined;
+  sourcePageCount: number;
+}
+
+// ==========================================
+// Learning Universe: Topic Resource Discovery Types
+// ==========================================
+
+export type TopicResourceVerificationStatus =
+  'syllabus_extracted' | 'verified_external' | 'recommended_unverified' | 'student_uploaded';
+
+export type TopicResourceType = 'textbook' | 'lecture' | 'article' | 'video' | 'practice';
+
+export interface TopicResource {
+  id: string;
+  topicId: string;
+  courseId: string;
+  userId: string;
+  title: string;
+  provider?: string | null | undefined;
+  url?: string | null | undefined;
+  type: TopicResourceType;
+  verificationStatus: TopicResourceVerificationStatus;
+  relevanceNote?: string | null | undefined;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+// ==========================================
+// Learning Universe: Personalized Study Planner Types
+// ==========================================
+
+export type StudyPlanStatus = 'active' | 'completed' | 'archived';
+export type StudySessionType = 'study' | 'review' | 'practice';
+export type StudySessionStatus = 'scheduled' | 'completed' | 'missed' | 'rescheduled';
+
+export interface StudyPlan {
+  id: string;
+  userId: string;
+  courseId?: string | null | undefined;
+  title: string;
+  targetExamDate?: Date | null | undefined;
+  availableHoursPerWeek: number;
+  dailyTargetMinutes: number;
+  status: StudyPlanStatus;
+  workloadWarning?: PlanWorkloadWarning | undefined;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface StudySession {
+  id: string;
+  planId: string;
+  userId: string;
+  courseId: string;
+  topicId: string;
+  title: string;
+  scheduledDate: Date;
+  durationMinutes: number;
+  sessionType: StudySessionType;
+  status: StudySessionStatus;
+  completedAt?: Date | null | undefined;
+  notes?: string | null | undefined;
+  orderIndex: number;
+  createdAt: Date;
+  updatedAt: Date;
+  topicTitle?: string | undefined;
+  courseCode?: string | undefined;
+}
+
+export interface GeneratePlanRequest {
+  courseId: string;
+  title?: string | undefined;
+  targetExamDate?: string | undefined;
+  availableHoursPerWeek?: number | undefined;
+  dailyTargetMinutes?: number | undefined;
+  studentConfidence?: 'beginner' | 'intermediate' | 'review_only' | undefined;
+}
+
+export interface PlanWorkloadWarning {
+  hasWarning: boolean;
+  totalRequiredMinutes: number;
+  availableMinutes: number;
+  deficitMinutes: number;
+  message?: string | undefined;
+}
+
+// ==========================================
+// Phase 2: Examination Papers & Question Types
+// ==========================================
+
+export type ExamPaperStatus = 'pending' | 'processing' | 'ready' | 'failed';
+
+export type ExamQuestionFormat =
+  'multiple_choice' | 'short_answer' | 'numerical' | 'essay' | 'derivation' | 'coding' | 'diagram';
+
+export type CognitiveLevel =
+  'remember' | 'understand' | 'apply' | 'analyze' | 'evaluate' | 'create';
+
+export type QuestionVerificationStatus = 'extracted' | 'verified_by_user' | 'rejected';
+
+export interface QuestionMultipleChoiceOption {
+  label: string;
+  text: string;
+  isCorrect?: boolean | undefined;
+  explanation?: string | undefined;
+}
+
+export interface CandidateTopicMatch {
+  topicId: string;
+  topicTitle: string;
+  confidence: number;
+  rationale?: string | undefined;
+}
+
+export interface ExaminationPaper {
+  id: string;
+  userId: string;
+  courseId: string;
+  resourceId?: string | null | undefined;
+  title: string;
+  term?: string | null | undefined;
+  examType?: string | null | undefined; // CAT-1, CAT-2, FAT, Midterm, Final, Quiz
+  academicYear?: string | null | undefined;
+  totalMarks?: number | null | undefined;
+  durationMinutes?: number | null | undefined;
+  instructions?: string | null | undefined;
+  status: ExamPaperStatus;
+  metadata?: Record<string, unknown> | null | undefined;
+  questionCount?: number | undefined;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface ExaminationQuestion {
+  id: string;
+  paperId: string;
+  userId: string;
+  courseId: string;
+  questionNumber: string; // e.g. "1", "1(a)", "Section B - Q4"
+  parentQuestionId?: string | null | undefined;
+  questionText: string;
+  marks?: number | null | undefined;
+  pageNumber?: number | null | undefined;
+  questionFormat: ExamQuestionFormat;
+  options?: QuestionMultipleChoiceOption[] | null | undefined;
+  compulsory: boolean;
+  choiceGroup?: string | null | undefined; // e.g. "Answer any 5 out of 7" or "Or choice with Q2"
+  candidateTopics: CandidateTopicMatch[];
+  topicId?: string | null | undefined;
+  topicConfidence?: number | null | undefined;
+  difficulty: 'easy' | 'medium' | 'hard' | 'uncertain';
+  difficultyUncertainty: number; // 0..1
+  cognitiveLevel?: CognitiveLevel | null | undefined;
+  verificationStatus: QuestionVerificationStatus;
+  userNotes?: string | null | undefined;
+  sourceSnippet?: string | null | undefined;
+  createdAt: Date;
+  updatedAt: Date;
+  topicTitle?: string | undefined;
+  subquestions?: ExaminationQuestion[] | undefined;
+}
+
+// ==========================================
+// Phase 2: Examination Analysis Engine Types
+// ==========================================
+
+export interface ExamPaperStructuralAnalysis {
+  paperId: string;
+  title: string;
+  totalMarks: number;
+  durationMinutes: number;
+  questionCount: number;
+  subquestionCount: number;
+  marksDistribution: Record<string, number>;
+  optionalRulesSummary: string[];
+  questionFormats: Record<string, number>;
+  syllabusCoveragePercentage: number;
+  coveredTopicIds: string[];
+  uncoveredTopicIds: string[];
+}
+
+export interface ExamTopicAnalysis {
+  topicId: string;
+  topicTitle: string;
+  questionCount: number;
+  totalMarksObserved: number;
+  questionReferences: Array<{
+    paperId: string;
+    paperTitle: string;
+    questionNumber: string;
+    marks?: number | undefined;
+  }>;
+  difficultyDistribution: Record<string, number>;
+}
+
+export interface CrossPaperComparisonReport {
+  courseId: string;
+  paperCount: number;
+  analyzedPaperIds: string[];
+  totalQuestionsAnalyzed: number;
+  repeatedTopicThemes: Array<{
+    topicId: string;
+    topicTitle: string;
+    frequency: number;
+    sampleQuestions: string[];
+  }>;
+  observedFormatShifts: string[];
+  topicCoverageSpread: Array<{
+    topicId: string;
+    topicTitle: string;
+    papersAppearedIn: number;
+    totalPapers: number;
+    coverageRatio: number;
+  }>;
+  uncoveredCourseTopics: Array<{
+    topicId: string;
+    topicTitle: string;
+  }>;
+  uncertaintyNote: string;
+}
+
+// ==========================================
+// Phase 2: Practice Assessments & Diagnostics
+// ==========================================
+
+export type PracticeAssessmentFormat =
+  'standard' | 'quick_diagnostic' | 'full_simulation' | 'targeted_weakness';
+
+export type PracticeAssessmentStatus = 'draft' | 'ready' | 'in_progress' | 'completed';
+
+export interface PracticeRubricItem {
+  criterion: string;
+  marks: number;
+  description: string;
+}
+
+export interface PracticeQuestion {
+  id: string;
+  questionNumber: string;
+  questionText: string;
+  marks: number;
+  topicId: string;
+  topicTitle: string;
+  difficulty: 'easy' | 'medium' | 'hard';
+  questionFormat: ExamQuestionFormat;
+  options?: QuestionMultipleChoiceOption[] | undefined;
+  workedSolution: string;
+  finalAnswer: string;
+  rubric: PracticeRubricItem[];
+  assumptions?: string | undefined;
+  validationStatus: 'verified' | 'unverified_warning';
+  sourceMaterialNote?: string | undefined;
+}
+
+export interface PracticeAssessment {
+  id: string;
+  userId: string;
+  courseId: string;
+  title: string;
+  format: PracticeAssessmentFormat;
+  blueprintId?: string | null | undefined;
+  totalMarks: number;
+  durationMinutes: number;
+  difficulty: 'easy' | 'medium' | 'hard';
+  status: PracticeAssessmentStatus;
+  questions: PracticeQuestion[];
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface PracticeStudentAnswer {
+  questionId: string;
+  studentAnswerText: string;
+  selectedOptionLabel?: string | undefined;
+  selfReportedConfidence?: 'low' | 'medium' | 'high' | undefined;
+}
+
+export type DiagnosticErrorCategory =
+  | 'conceptual_misunderstanding'
+  | 'calculation_error'
+  | 'incomplete_explanation'
+  | 'misread_question'
+  | 'knowledge_gap'
+  | 'none';
+
+export interface QuestionDiagnosticFeedback {
+  questionId: string;
+  questionNumber: string;
+  maxMarks: number;
+  earnedMarks: number;
+  isGradingEstimated: boolean;
+  confidenceComment: string;
+  correctSteps: string[];
+  incorrectSteps: string[];
+  errorCategory: DiagnosticErrorCategory;
+  relatedTopicId: string;
+  relatedTopicTitle: string;
+  feedbackSummary: string;
+  recommendedReviewAction: string;
+}
+
+export interface PracticeDiagnosticReport {
+  submissionId: string;
+  totalEarnedMarks: number;
+  totalMaxMarks: number;
+  percentage: number;
+  demonstratedStrengths: string[];
+  criticalWeaknesses: string[];
+  recommendedFollowUpTopics: Array<{
+    topicId: string;
+    topicTitle: string;
+    priority: 'high' | 'medium' | 'low';
+    recommendedMinutes: number;
+  }>;
+  questionFeedback: QuestionDiagnosticFeedback[];
+  generatedAt: string;
+}
+
+export interface PracticeSubmission {
+  id: string;
+  assessmentId: string;
+  userId: string;
+  courseId: string;
+  startedAt: Date;
+  submittedAt?: Date | null | undefined;
+  timeSpentSeconds: number;
+  answers: Record<string, PracticeStudentAnswer>;
+  diagnosticFeedback?: PracticeDiagnosticReport | null | undefined;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+// ==========================================
+// Phase 2: Centralized AI Usage Controls & Accounting
+// ==========================================
+
+export interface AiTaskExecutionRecord {
+  id: string;
+  userId: string;
+  taskType: string;
+  taskVersion: string;
+  model: string;
+  provider: string;
+  inputTokens?: number | undefined;
+  outputTokens?: number | undefined;
+  estimatedCostMicroCents?: number | undefined;
+  durationMs: number;
+  status: 'success' | 'failed' | 'cached' | 'rate_limited';
+  contentHash?: string | undefined;
+  cached: boolean;
+  createdAt: Date;
+}
+
+export interface AiUsageQuotaStatus {
+  userId: string;
+  tier: 'free' | 'pro';
+  requestsInWindow: number;
+  windowLimit: number;
+  windowResetAt: Date;
+  dailyTokensUsed: number;
+  dailyTokenLimit: number;
+  monthlyTokensUsed: number;
+  monthlyTokenLimit: number;
+  currentConcurrency: number;
+  concurrencyLimit: number;
+  isThrottled: boolean;
 }
