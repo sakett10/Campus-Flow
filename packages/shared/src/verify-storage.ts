@@ -32,8 +32,8 @@ async function runStorageVerification() {
 
   const endpoint = process.env['STORAGE_ENDPOINT'] || 'http://127.0.0.1:9000';
   const bucket = process.env['STORAGE_BUCKET'] || 'campusflow-dev';
-  const accessKeyId = process.env['STORAGE_ACCESS_KEY'] || 'S3RVER';
-  const secretAccessKey = process.env['STORAGE_SECRET_KEY'] || 'S3RVER';
+  const accessKeyId = process.env['STORAGE_ACCESS_KEY'] || 'minioadmin';
+  const secretAccessKey = process.env['STORAGE_SECRET_KEY'] || 'minioadmin';
   const region = process.env['STORAGE_REGION'] || 'us-east-1';
   const forcePathStyle = process.env['STORAGE_FORCE_PATH_STYLE'] === 'true';
 

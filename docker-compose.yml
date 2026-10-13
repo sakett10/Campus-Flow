@@ -15,5 +15,24 @@ services:
     ports:
       - '6379:6379'
 
+  minio:
+    image: soldevelo/minio:2026.7.17
+    environment:
+      MINIO_ROOT_USER: ${STORAGE_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${STORAGE_SECRET_KEY:-minioadmin}
+      MINIO_DEFAULT_BUCKETS: ${STORAGE_BUCKET:-campusflow-dev}
+      MINIO_BROWSER: 'on'
+    ports:
+      - '9000:9000'
+      - '9001:9001'
+    volumes:
+      - campusflow_storage:/bitnami/minio/data
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:9000/minio/health/live']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
 volumes:
   campusflow_pg:
+  campusflow_storage:
