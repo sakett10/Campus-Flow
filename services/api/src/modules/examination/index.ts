@@ -5,6 +5,7 @@ import { defaultStore } from '../../data/store.js';
 import {
   AppError,
   validateFileBytes,
+  validateBatchUploadLimits,
   extractDocumentText,
   parseExaminationDocument,
   analyzeExamPaper,
@@ -22,6 +23,8 @@ import type {
   PracticeAssessmentFormat,
   QuestionVerificationStatus,
   PracticeStudentAnswer,
+  BatchExamPaperItemResult,
+  BatchExamPaperUploadResponse,
 } from '@campusflow/types';
 
 export const examinationRouter = new Hono();
@@ -56,26 +59,96 @@ const updateQuestionSchema = z.object({
     .optional(),
 });
 
-const generatePracticeSchema = z.object({
-  format: z
-    .enum(['standard', 'quick_diagnostic', 'full_simulation', 'targeted_weakness'])
-    .default('standard'),
-  blueprintId: z.string().uuid().optional().nullable(),
-  targetDifficulty: z.enum(['easy', 'medium', 'hard']).default('medium'),
-  focusTopicIds: z.array(z.string().uuid()).optional(),
-});
+const generatePracticeSchema = z
+  .object({
+    format: z
+      .string({ invalid_type_error: 'format must be a string' })
+      .optional()
+      .default('standard')
+      .transform((val) => {
+        const normalized = val?.toLowerCase();
+        if (normalized === 'mixed' || normalized === 'numerical_drill') return 'standard';
+        if (normalized === 'conceptual_quick') return 'quick_diagnostic';
+        return val;
+      })
+      .pipe(
+        z.enum(['standard', 'quick_diagnostic', 'full_simulation', 'targeted_weakness'], {
+          errorMap: (_issue, ctx) => ({
+            message: `Unsupported examination format '${ctx.data}'. Supported formats are: 'standard', 'quick_diagnostic', 'full_simulation', 'targeted_weakness'.`,
+          }),
+        }),
+      ),
+    blueprintId: z
+      .string({ invalid_type_error: 'blueprintId must be a UUID string' })
+      .uuid({ message: 'blueprintId must be a valid UUID' })
+      .or(z.literal(''))
+      .nullable()
+      .optional()
+      .transform((val) => (val === '' ? null : (val ?? null))),
+    targetDifficulty: z
+      .enum(['easy', 'medium', 'hard'], {
+        errorMap: (_issue, ctx) => ({
+          message: `Invalid targetDifficulty '${ctx.data}'. Expected 'easy', 'medium', or 'hard'.`,
+        }),
+      })
+      .optional(),
+    difficulty: z
+      .enum(['easy', 'medium', 'hard'], {
+        errorMap: (_issue, ctx) => ({
+          message: `Invalid difficulty '${ctx.data}'. Expected 'easy', 'medium', or 'hard'.`,
+        }),
+      })
+      .optional(),
+    focusTopicIds: z
+      .array(z.string().uuid({ message: 'Each focusTopicId must be a valid UUID' }), {
+        invalid_type_error: 'focusTopicIds must be an array of UUIDs',
+      })
+      .optional(),
+  })
+  .transform((data) => ({
+    format: data.format,
+    blueprintId: data.blueprintId ?? null,
+    targetDifficulty: data.targetDifficulty || data.difficulty || 'medium',
+    focusTopicIds: data.focusTopicIds,
+  }));
 
 const submitPracticeSchema = z.object({
-  timeSpentSeconds: z.number().int().min(0).default(0),
-  answers: z.record(
-    z.string(),
-    z.object({
-      questionId: z.string(),
-      studentAnswerText: z.string().default(''),
-      selectedOptionLabel: z.string().optional(),
-      selfReportedConfidence: z.enum(['low', 'medium', 'high']).optional(),
-    }),
-  ),
+  timeSpentSeconds: z.number().int().min(0, 'timeSpentSeconds must be non-negative').default(0),
+  answers: z
+    .record(
+      z.string(),
+      z.object({
+        questionId: z.string(),
+        studentAnswerText: z.string().default(''),
+        selectedOptionLabel: z.string().optional(),
+        selfReportedConfidence: z.enum(['low', 'medium', 'high']).optional(),
+      }),
+    )
+    .or(
+      z
+        .array(
+          z.object({
+            questionId: z.string(),
+            studentAnswer: z.string().optional(),
+            studentAnswerText: z.string().optional(),
+            selectedOptionLabel: z.string().optional(),
+            selfReportedConfidence: z.enum(['low', 'medium', 'high']).optional(),
+          }),
+        )
+        .transform((arr) =>
+          Object.fromEntries(
+            arr.map((item) => [
+              item.questionId,
+              {
+                questionId: item.questionId,
+                studentAnswerText: item.studentAnswerText || item.studentAnswer || '',
+                selectedOptionLabel: item.selectedOptionLabel,
+                selfReportedConfidence: item.selfReportedConfidence,
+              },
+            ]),
+          ),
+        ),
+    ),
 });
 
 // ==========================================
@@ -219,6 +292,169 @@ examinationRouter.post('/courses/:courseId/papers/upload', async (c) => {
   );
 });
 
+// POST /api/v1/examination/courses/:courseId/papers/batch
+examinationRouter.post('/courses/:courseId/papers/batch', async (c) => {
+  const session = getSession(c);
+  const courseId = c.req.param('courseId');
+  const course = await defaultStore.getCourse(courseId, session.userId);
+
+  const formData = await c.req.parseBody({ all: true }).catch(() => null);
+  if (!formData) {
+    throw AppError.badRequest('Multipart form data is required for batch examination upload.');
+  }
+
+  const rawFiles = formData['files'] ?? formData['file'];
+  const filesList: File[] = [];
+  if (Array.isArray(rawFiles)) {
+    for (const f of rawFiles) {
+      if (f && typeof f === 'object' && 'arrayBuffer' in f) {
+        filesList.push(f as unknown as File);
+      }
+    }
+  } else if (rawFiles && typeof rawFiles === 'object' && 'arrayBuffer' in rawFiles) {
+    filesList.push(rawFiles as unknown as File);
+  }
+
+  if (filesList.length === 0) {
+    throw AppError.badRequest('At least one examination paper file is required in batch upload.');
+  }
+
+  const batchLimitsValidation = validateBatchUploadLimits(
+    filesList.map((f) => ({ size: f.size || 0, name: f.name })),
+  );
+  if (!batchLimitsValidation.isValid) {
+    throw AppError.badRequest(batchLimitsValidation.error || 'Batch upload limits exceeded.');
+  }
+
+  const academicNodes = await defaultStore.listAcademicNodes(courseId, session.userId);
+  const results: BatchExamPaperItemResult[] = [];
+
+  for (const file of filesList) {
+    const originalName = file.name || 'examination_paper.pdf';
+    const fileName = normalizeFileName(originalName);
+
+    try {
+      const arrayBuffer = await file.arrayBuffer();
+      const buffer = Buffer.from(arrayBuffer);
+
+      // Validate file bytes
+      const validated = validateFileBytes(buffer, fileName);
+      if (!validated.isValid) {
+        results.push({
+          originalName,
+          fileName,
+          sizeBytes: file.size,
+          status: 'rejected',
+          error: validated.error || 'Invalid file format or signature.',
+        });
+        continue;
+      }
+
+      // Extract text
+      const extraction = await extractDocumentText(buffer, validated.detectedMimeType);
+
+      // Parse question paper structure
+      const parsed = parseExaminationDocument(extraction, academicNodes);
+
+      // Store in object storage
+      const objectKey = `users/${session.userId}/resources/${Date.now()}_${Math.random().toString(36).substring(2, 8)}_${encodeURIComponent(fileName)}`;
+      await sharedStorage.upload(objectKey, buffer, validated.detectedMimeType);
+
+      const resource = await defaultStore.createResource({
+        userId: session.userId,
+        courseId,
+        title: parsed.title || fileName,
+        type: 'question_bank',
+        objectKey,
+        mimeType: validated.detectedMimeType,
+        sizeBytes: validated.sizeBytes,
+        contentHash: validated.contentHash,
+        pageCount: extraction.pageCount,
+        processingStatus: parsed.status === 'ready' ? 'ready' : 'failed',
+      });
+
+      const paper = await defaultStore.createExaminationPaper({
+        userId: session.userId,
+        courseId,
+        resourceId: resource.id,
+        title: parsed.title || `${course.code} Examination Paper`,
+        term: parsed.term || course.term || null,
+        examType: parsed.examType || 'FAT',
+        academicYear: parsed.academicYear || null,
+        totalMarks: parsed.totalMarks ?? null,
+        durationMinutes: parsed.durationMinutes ?? 180,
+        instructions: parsed.instructions ?? null,
+        status: parsed.status,
+        metadata: {
+          unclearFields: parsed.unclearFields,
+          warnings: parsed.warnings,
+          detectedMimeType: validated.detectedMimeType,
+        },
+      });
+
+      const questionsToInsert = parsed.questions.map((q) => ({
+        paperId: paper.id,
+        userId: session.userId,
+        courseId,
+        questionNumber: q.questionNumber,
+        parentQuestionId: null,
+        questionText: q.questionText,
+        marks: q.marks ?? null,
+        pageNumber: q.pageNumber ?? null,
+        questionFormat: q.questionFormat,
+        options: q.options ?? null,
+        compulsory: q.compulsory,
+        choiceGroup: q.choiceGroup ?? null,
+        candidateTopics: q.candidateTopics,
+        topicId: q.topicId ?? null,
+        topicConfidence: q.topicConfidence ?? null,
+        difficulty: q.difficulty,
+        difficultyUncertainty: q.difficultyUncertainty,
+        cognitiveLevel: q.cognitiveLevel ?? null,
+        verificationStatus: 'extracted' as QuestionVerificationStatus,
+        userNotes: null,
+        sourceSnippet: q.sourceSnippet,
+      }));
+
+      const createdQuestions = await defaultStore.createExaminationQuestions(questionsToInsert);
+
+      results.push({
+        originalName,
+        fileName,
+        sizeBytes: validated.sizeBytes,
+        status: 'uploaded',
+        paperId: paper.id,
+        resourceId: resource.id,
+        questionCount: createdQuestions.length,
+        title: paper.title,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Paper parsing failed.';
+      results.push({
+        originalName,
+        fileName,
+        sizeBytes: file.size,
+        status: 'error',
+        error: msg,
+      });
+    }
+  }
+
+  const succeeded = results.filter((r) => r.status === 'uploaded').length;
+  const failed = results.filter((r) => r.status === 'rejected' || r.status === 'error').length;
+
+  const response: BatchExamPaperUploadResponse = {
+    summary: {
+      total: filesList.length,
+      succeeded,
+      failed,
+    },
+    results,
+  };
+
+  return c.json(response, 200);
+});
+
 // GET /api/v1/examination/papers/:paperId
 examinationRouter.get('/papers/:paperId', async (c) => {
   const session = getSession(c);
@@ -337,12 +573,20 @@ examinationRouter.post('/courses/:courseId/practice/generate', async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const parsed = generatePracticeSchema.safeParse(body);
   if (!parsed.success) {
-    throw AppError.badRequest('Invalid generate practice payload', parsed.error.format());
+    const errorDetails = parsed.error.issues.map((issue) => ({
+      name: issue.path.join('.') || 'payload',
+      reason: issue.message,
+    }));
+    const summary = errorDetails.map((e) => `${e.name} (${e.reason})`).join('; ');
+    throw AppError.badRequest(`Invalid generate practice payload: ${summary}`, errorDetails);
   }
 
   let blueprint = null;
   if (parsed.data.blueprintId) {
     blueprint = await defaultStore.getExaminationPaper(parsed.data.blueprintId, session.userId);
+    if (blueprint.courseId !== courseId) {
+      throw AppError.forbidden('Examination paper blueprint does not belong to this course.');
+    }
   }
 
   const nodes = await defaultStore.listAcademicNodes(courseId, session.userId);
@@ -427,7 +671,12 @@ examinationRouter.post('/practice/:assessmentId/submit', async (c) => {
   const body = await c.req.json().catch(() => null);
   const parsed = submitPracticeSchema.safeParse(body);
   if (!parsed.success) {
-    throw AppError.badRequest('Invalid submission payload', parsed.error.format());
+    const errorDetails = parsed.error.issues.map((issue) => ({
+      name: issue.path.join('.') || 'payload',
+      reason: issue.message,
+    }));
+    const summary = errorDetails.map((e) => `${e.name} (${e.reason})`).join('; ');
+    throw AppError.badRequest(`Invalid submission payload: ${summary}`, errorDetails);
   }
 
   const submissionId = crypto.randomUUID();

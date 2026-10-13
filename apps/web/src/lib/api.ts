@@ -53,7 +53,20 @@ import type {
   QuestionDiagnosticFeedback,
   PracticeDiagnosticReport,
   AiUsageQuotaStatus,
+  ResourceType,
+  BatchUploadResponse,
+  BatchUploadItemResult,
+  BatchExamPaperUploadResponse,
+  BatchExamPaperItemResult,
+  GeneratePracticeRequest,
 } from '@campusflow/types';
+
+export type {
+  BatchUploadResponse,
+  BatchUploadItemResult,
+  BatchExamPaperUploadResponse,
+  BatchExamPaperItemResult,
+};
 
 const API_BASE = process.env['NEXT_PUBLIC_API_URL'] || 'http://localhost:3001/api/v1';
 
@@ -112,11 +125,57 @@ export async function getAuthHeaders(
 
   if (token) {
     headers['Authorization'] = `Bearer ${token}`;
-  } else if (process.env['NODE_ENV'] !== 'production') {
+  } else if (process.env['NODE_ENV'] === 'test' && process.env['AUTH_TEST_BYPASS'] === 'true') {
     headers['x-test-user-id'] = '11111111-1111-4111-a111-111111111111';
+    headers['Authorization'] = 'Bearer test_user_dev_web';
   }
 
   return headers;
+}
+
+/**
+ * Robust HTTP client with Bearer authentication and single-retry 401 token refresh.
+ */
+export async function fetchWithAuth(
+  urlOrPath: string,
+  init: RequestInit = {},
+  tokenOverride?: string | null,
+): Promise<Response> {
+  const url = urlOrPath.startsWith('http')
+    ? urlOrPath
+    : `${API_BASE}${urlOrPath.startsWith('/') ? '' : '/'}${urlOrPath}`;
+  const isFormData = typeof FormData !== 'undefined' && init.body instanceof FormData;
+
+  let headers = await getAuthHeaders(tokenOverride, !isFormData);
+  if (init.headers) {
+    const customHeaders = new Headers(init.headers);
+    const merged: Record<string, string> = { ...(headers as Record<string, string>) };
+    customHeaders.forEach((value, key) => {
+      merged[key] = value;
+    });
+    headers = merged;
+  }
+
+  let res = await fetch(url, { ...init, headers });
+
+  // Safe 1-time retry on 401 Unauthorized (attempt fresh session token)
+  if (res.status === 401) {
+    const freshToken = await getClerkSessionToken(true);
+    if (freshToken && freshToken !== tokenOverride) {
+      let freshHeaders = await getAuthHeaders(freshToken, !isFormData);
+      if (init.headers) {
+        const customHeaders = new Headers(init.headers);
+        const merged: Record<string, string> = { ...(freshHeaders as Record<string, string>) };
+        customHeaders.forEach((value, key) => {
+          merged[key] = value;
+        });
+        freshHeaders = merged;
+      }
+      res = await fetch(url, { ...init, headers: freshHeaders });
+    }
+  }
+
+  return res;
 }
 
 export async function fetchCourses(): Promise<Course[]> {
@@ -215,12 +274,12 @@ export async function fetchResources(courseId?: string): Promise<Resource[]> {
   }
 }
 
-export async function fetchResource(id: string): Promise<Resource | null> {
+export async function fetchResource(
+  id: string,
+  tokenOverride?: string | null,
+): Promise<Resource | null> {
   try {
-    const res = await fetch(`${API_BASE}/resources/${id}`, {
-      headers: await getAuthHeaders(),
-      cache: 'no-store',
-    });
+    const res = await fetchWithAuth(`/resources/${id}`, { cache: 'no-store' }, tokenOverride);
     if (!res.ok) return null;
     return await res.json();
   } catch {
@@ -1058,7 +1117,6 @@ export async function extractSyllabus(
   warnings?: string[];
 }> {
   const token = tokenOverride || (await getClerkSessionToken(true));
-  let headers = await getAuthHeaders(token, !input.file);
 
   let body: FormData | string;
   if (input.file) {
@@ -1069,24 +1127,14 @@ export async function extractSyllabus(
     body = JSON.stringify(input);
   }
 
-  let res = await fetch(`${API_BASE}/courses/extract-syllabus`, {
-    method: 'POST',
-    headers,
-    body,
-  });
-
-  // Safe 1-time retry on confirmed authentication rejection
-  if (res.status === 401) {
-    const freshToken = await getClerkSessionToken(true);
-    if (freshToken && freshToken !== token) {
-      headers = await getAuthHeaders(freshToken, !input.file);
-      res = await fetch(`${API_BASE}/courses/extract-syllabus`, {
-        method: 'POST',
-        headers,
-        body,
-      });
-    }
-  }
+  const res = await fetchWithAuth(
+    '/courses/extract-syllabus',
+    {
+      method: 'POST',
+      body,
+    },
+    token,
+  );
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: 'Failed to extract syllabus' }));
@@ -1328,18 +1376,116 @@ export async function fetchPlannerOverview(): Promise<{
 export async function uploadExaminationPaper(
   courseId: string,
   formData: FormData,
+  tokenOverride?: string | null,
 ): Promise<{ paper: ExaminationPaper; questions: ExaminationQuestion[] }> {
-  const headers = await getAuthHeaders(undefined, false);
-
-  const res = await fetch(`${API_BASE}/examination/courses/${courseId}/papers/upload`, {
-    method: 'POST',
-    headers,
-    body: formData,
-  });
+  const res = await fetchWithAuth(
+    `/examination/courses/${courseId}/papers/upload`,
+    {
+      method: 'POST',
+      body: formData,
+    },
+    tokenOverride,
+  );
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: 'Failed to upload examination paper' }));
     throw new Error(err.detail || err.message || 'Failed to upload examination paper');
+  }
+
+  return await res.json();
+}
+
+export async function uploadBatchExaminationPapers(
+  courseId: string,
+  files: File[],
+  tokenOverride?: string | null,
+): Promise<BatchExamPaperUploadResponse> {
+  const formData = new FormData();
+  for (const file of files) {
+    formData.append('files', file);
+  }
+
+  const res = await fetchWithAuth(
+    `/examination/courses/${courseId}/papers/batch`,
+    {
+      method: 'POST',
+      body: formData,
+    },
+    tokenOverride,
+  );
+
+  if (!res.ok) {
+    const err = await res
+      .json()
+      .catch(() => ({ detail: 'Failed to batch upload examination papers' }));
+    throw new Error(err.detail || err.message || 'Failed to batch upload examination papers');
+  }
+
+  return await res.json();
+}
+
+export async function uploadResource(
+  file: File,
+  options: {
+    courseId?: string | null;
+    type?: ResourceType;
+    duplicateAction?: 'reject' | 'replace' | 'keep_both';
+    token?: string | null;
+  } = {},
+): Promise<Resource> {
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('title', file.name);
+  if (options.type) formData.append('type', options.type);
+  if (options.courseId) formData.append('courseId', options.courseId);
+  if (options.duplicateAction) formData.append('duplicateAction', options.duplicateAction);
+
+  const res = await fetchWithAuth(
+    '/resources/direct',
+    {
+      method: 'POST',
+      body: formData,
+    },
+    options.token,
+  );
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Upload failed' }));
+    throw new Error(err.detail || err.message || 'Upload failed');
+  }
+
+  return await res.json();
+}
+
+export async function uploadBatchResources(
+  files: File[],
+  options: {
+    courseId?: string | null;
+    type?: ResourceType;
+    duplicateAction?: 'reject' | 'replace' | 'keep_both';
+    token?: string | null;
+  } = {},
+): Promise<BatchUploadResponse> {
+  const formData = new FormData();
+  for (const file of files) {
+    formData.append('files', file);
+  }
+  if (options.courseId) formData.append('courseId', options.courseId);
+  if (options.type) formData.append('type', options.type);
+  if (options.duplicateAction) formData.append('duplicateAction', options.duplicateAction);
+
+  const res = await fetchWithAuth(
+    '/resources/batch',
+    {
+      method: 'POST',
+      body: formData,
+    },
+    options.token,
+  );
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Batch upload failed' }));
+    throw new Error(err.detail || err.message || 'Batch upload failed');
   }
 
   return await res.json();
@@ -1417,12 +1563,7 @@ export async function fetchCourseExaminationAnalysis(courseId: string): Promise<
 
 export async function generatePracticeAssessment(
   courseId: string,
-  options: {
-    format?: string;
-    blueprintId?: string;
-    difficulty?: string;
-    focusTopicIds?: string[];
-  } = {},
+  options: GeneratePracticeRequest = {},
 ): Promise<{ assessment: PracticeAssessment; questions: PracticeQuestion[] }> {
   const headers = await getAuthHeaders();
   const res = await fetch(`${API_BASE}/examination/courses/${courseId}/practice/generate`, {
@@ -1435,10 +1576,21 @@ export async function generatePracticeAssessment(
     const err = await res
       .json()
       .catch(() => ({ detail: 'Failed to generate practice assessment' }));
-    throw new Error(err.detail || err.message || 'Failed to generate practice assessment');
+    const invalidDetails = Array.isArray(err.invalidParams)
+      ? err.invalidParams
+          .map((p: { name: string; reason: string }) => `${p.name}: ${p.reason}`)
+          .join('; ')
+      : '';
+    const message = invalidDetails
+      ? `${err.detail || 'Validation error'}: ${invalidDetails}`
+      : err.detail || err.message || 'Failed to generate practice assessment';
+    throw new Error(message);
   }
 
-  return await res.json();
+  const data = await res.json();
+  const assessment: PracticeAssessment = data.assessment || data;
+  const questions: PracticeQuestion[] = data.questions || assessment?.questions || [];
+  return { assessment, questions };
 }
 
 export async function fetchPracticeAssessment(
@@ -1454,15 +1606,26 @@ export async function fetchPracticeAssessment(
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: 'Failed to fetch practice assessment' }));
-    throw new Error(err.detail || err.message || 'Failed to fetch practice assessment');
+    const invalidDetails = Array.isArray(err.invalidParams)
+      ? err.invalidParams
+          .map((p: { name: string; reason: string }) => `${p.name}: ${p.reason}`)
+          .join('; ')
+      : '';
+    const message = invalidDetails
+      ? `${err.detail || 'Failed to fetch practice assessment'}: ${invalidDetails}`
+      : err.detail || err.message || 'Failed to fetch practice assessment';
+    throw new Error(message);
   }
 
-  return await res.json();
+  const data = await res.json();
+  const assessment: PracticeAssessment = data.assessment || data;
+  const questions: PracticeQuestion[] = data.questions || assessment?.questions || [];
+  return { assessment, questions };
 }
 
 export async function submitPracticeAssessment(
   assessmentId: string,
-  answers: Array<{ questionId: string; studentAnswer: string }>,
+  answers: Array<{ questionId: string; studentAnswer: string }> | Record<string, unknown>,
 ): Promise<{
   submission: PracticeSubmission;
   feedback: QuestionDiagnosticFeedback[];
@@ -1477,10 +1640,23 @@ export async function submitPracticeAssessment(
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: 'Failed to submit practice assessment' }));
-    throw new Error(err.detail || err.message || 'Failed to submit practice assessment');
+    const invalidDetails = Array.isArray(err.invalidParams)
+      ? err.invalidParams
+          .map((p: { name: string; reason: string }) => `${p.name}: ${p.reason}`)
+          .join('; ')
+      : '';
+    const message = invalidDetails
+      ? `${err.detail || 'Failed to submit practice assessment'}: ${invalidDetails}`
+      : err.detail || err.message || 'Failed to submit practice assessment';
+    throw new Error(message);
   }
 
-  return await res.json();
+  const data = await res.json();
+  return {
+    submission: data.submission,
+    feedback: data.report?.questionFeedback || data.feedback || [],
+    report: data.report,
+  };
 }
 
 export async function fetchAiQuotaStatus(): Promise<AiUsageQuotaStatus> {

@@ -9,10 +9,12 @@ import {
   createObjectStorageFromEnv,
   normalizeFileName,
   validateFileBytes,
+  validateBatchUploadLimits,
   INGESTION_LIMITS,
   TransactionalOutboxManager,
   InMemoryOutboxStore,
 } from '@campusflow/shared';
+import type { BatchUploadItemResult, BatchUploadResponse } from '@campusflow/types';
 import { PostgresOutboxStore } from '@campusflow/database';
 
 export function createOutboxStore(): OutboxStore {
@@ -241,35 +243,226 @@ resourcesRouter.post('/direct', async (c) => {
         409,
       );
     }
-    if (duplicateAction === 'replace') {
-      await defaultStore.deleteResource(existing.id, session.userId);
-    }
+    // For 'replace', do NOT delete the existing resource yet. Wait until new storage upload succeeds!
   }
 
   // Upload to object storage
   const objectKey = `users/${session.userId}/resources/${Date.now()}_${encodeURIComponent(validation.normalizedFileName)}`;
   await sharedStorage.upload(objectKey, buffer, validation.detectedMimeType);
 
-  // Atomically create resource record and enqueue outbox job
-  const { resource } = await defaultStore.createResourceWithOutbox(
-    {
-      userId: session.userId,
-      courseId,
-      title: title || validation.normalizedFileName,
-      type,
-      objectKey,
-      mimeType: validation.detectedMimeType,
-      sizeBytes: validation.sizeBytes,
-      contentHash: validation.contentHash,
-      processingStatus: 'queued',
-    },
-    {
-      queueName: 'resource-processing',
-      maxAttempts: 3,
-    },
-  );
+  try {
+    if (existing && duplicateAction === 'replace') {
+      await defaultStore.deleteResource(existing.id, session.userId);
+    }
 
-  return c.json(resource, 201);
+    // Atomically create resource record and enqueue outbox job
+    const { resource } = await defaultStore.createResourceWithOutbox(
+      {
+        userId: session.userId,
+        courseId,
+        title: title || validation.normalizedFileName,
+        type,
+        objectKey,
+        mimeType: validation.detectedMimeType,
+        sizeBytes: validation.sizeBytes,
+        contentHash: validation.contentHash,
+        processingStatus: 'queued',
+      },
+      {
+        queueName: 'resource-processing',
+        maxAttempts: 3,
+      },
+    );
+
+    return c.json(resource, 201);
+  } catch (dbErr) {
+    // Compensating cleanup: if database persistence fails, delete newly uploaded object from storage
+    await sharedStorage.delete(objectKey).catch(() => {});
+    throw dbErr;
+  }
+});
+
+// POST /api/v1/resources/batch (Multi-file upload with atomic checks and independent per-file processing)
+resourcesRouter.post('/batch', async (c) => {
+  const session = getSession(c);
+  const formData = await c.req.parseBody({ all: true }).catch(() => null);
+
+  if (!formData) {
+    throw AppError.badRequest('Multipart form data is required for batch upload.');
+  }
+
+  // Extract all files from formData ('files' or 'file')
+  const rawFiles = formData['files'] ?? formData['file'];
+  const filesList: File[] = [];
+  if (Array.isArray(rawFiles)) {
+    for (const f of rawFiles) {
+      if (f && typeof f === 'object' && 'arrayBuffer' in f) {
+        filesList.push(f as unknown as File);
+      }
+    }
+  } else if (rawFiles && typeof rawFiles === 'object' && 'arrayBuffer' in rawFiles) {
+    filesList.push(rawFiles as unknown as File);
+  }
+
+  if (filesList.length === 0) {
+    throw AppError.badRequest('At least one file is required in multipart batch upload.');
+  }
+
+  // Validate batch limits (count and aggregate size)
+  const batchLimitsValidation = validateBatchUploadLimits(
+    filesList.map((f) => ({ size: f.size || 0, name: f.name })),
+  );
+  if (!batchLimitsValidation.isValid) {
+    throw AppError.badRequest(batchLimitsValidation.error || 'Batch upload limits exceeded.');
+  }
+
+  // Course authorization check
+  const rawCourseId = formData['courseId'];
+  const courseId =
+    typeof rawCourseId === 'string' && rawCourseId.trim() ? rawCourseId.trim() : null;
+  if (courseId) {
+    await defaultStore.getCourse(courseId, session.userId);
+  }
+
+  const rawType = formData['type'];
+  const defaultType = (
+    typeof rawType === 'string' &&
+    ['syllabus', 'lecture_notes', 'question_bank', 'reference_material'].includes(rawType)
+      ? rawType
+      : 'lecture_notes'
+  ) as 'syllabus' | 'lecture_notes' | 'question_bank' | 'reference_material';
+
+  const duplicateAction = (
+    typeof formData['duplicateAction'] === 'string' ? formData['duplicateAction'] : 'reject'
+  ) as 'reject' | 'replace' | 'keep_both';
+
+  const results: BatchUploadItemResult[] = [];
+
+  for (const file of filesList) {
+    const originalName = file.name || 'document.pdf';
+    const fileName = normalizeFileName(originalName);
+
+    try {
+      if (file.size > INGESTION_LIMITS.MAX_FILE_SIZE_BYTES) {
+        results.push({
+          originalName,
+          fileName,
+          sizeBytes: file.size,
+          status: 'rejected',
+          error: `File size (${(file.size / (1024 * 1024)).toFixed(2)} MB) exceeds maximum allowed size of 50 MB.`,
+        });
+        continue;
+      }
+
+      const arrayBuf = await file.arrayBuffer();
+      const buffer = Buffer.from(arrayBuf);
+
+      // Validate file signature, extension, and individual size
+      const validation = validateFileBytes(buffer, fileName);
+      if (!validation.isValid) {
+        results.push({
+          originalName,
+          fileName,
+          sizeBytes: file.size,
+          status: 'rejected',
+          error: validation.error || 'Invalid file format or signature.',
+        });
+        continue;
+      }
+
+      // Check duplicates within user's library
+      const existing = await defaultStore.findResourceByHash(
+        session.userId,
+        validation.contentHash,
+      );
+      if (existing) {
+        if (duplicateAction === 'reject') {
+          results.push({
+            originalName,
+            fileName: validation.normalizedFileName,
+            sizeBytes: validation.sizeBytes,
+            status: 'conflict',
+            error: 'Duplicate document detected. An identical file already exists in your library.',
+            duplicateResource: {
+              id: existing.id,
+              title: existing.title,
+              courseId: existing.courseId,
+              createdAt: existing.createdAt,
+            },
+          });
+          continue;
+        }
+        // For 'replace', do not delete existing document until new upload succeeds!
+      }
+
+      // Store in object storage
+      const objectKey = `users/${session.userId}/resources/${Date.now()}_${Math.random().toString(36).substring(2, 8)}_${encodeURIComponent(validation.normalizedFileName)}`;
+      await sharedStorage.upload(objectKey, buffer, validation.detectedMimeType);
+
+      try {
+        if (existing && duplicateAction === 'replace') {
+          await defaultStore.deleteResource(existing.id, session.userId);
+        }
+
+        // Atomically create resource record and enqueue outbox job
+        const { resource } = await defaultStore.createResourceWithOutbox(
+          {
+            userId: session.userId,
+            courseId,
+            title: validation.normalizedFileName,
+            type: defaultType,
+            objectKey,
+            mimeType: validation.detectedMimeType,
+            sizeBytes: validation.sizeBytes,
+            contentHash: validation.contentHash,
+            processingStatus: 'queued',
+          },
+          {
+            queueName: 'resource-processing',
+            maxAttempts: 3,
+          },
+        );
+
+        results.push({
+          originalName,
+          fileName: validation.normalizedFileName,
+          sizeBytes: validation.sizeBytes,
+          status: 'uploaded',
+          processingStatus: 'queued',
+          resourceId: resource.id,
+        });
+      } catch (dbErr) {
+        // Compensating cleanup: if database persistence fails, delete newly uploaded object from storage
+        await sharedStorage.delete(objectKey).catch(() => {});
+        throw dbErr;
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Upload failed.';
+      results.push({
+        originalName,
+        fileName,
+        sizeBytes: file.size,
+        status: 'error',
+        error: msg,
+      });
+    }
+  }
+
+  const succeeded = results.filter((r) => r.status === 'uploaded').length;
+  const conflicts = results.filter((r) => r.status === 'conflict').length;
+  const failed = results.filter((r) => r.status === 'rejected' || r.status === 'error').length;
+
+  const response: BatchUploadResponse = {
+    summary: {
+      total: filesList.length,
+      succeeded,
+      failed,
+      conflicts,
+    },
+    results,
+  };
+
+  return c.json(response, 200);
 });
 
 // POST /api/v1/resources/:id/retry

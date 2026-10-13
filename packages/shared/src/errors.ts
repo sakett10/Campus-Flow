@@ -86,6 +86,20 @@ export class AppError extends Error {
 
 export function formatErrorResponse(error: unknown, instancePath?: string): ErrorResponseEnvelope {
   if (error instanceof AppError) {
+    let invalidParams: Array<{ name: string; reason: string }> | undefined;
+    if (Array.isArray(error.details)) {
+      invalidParams = error.details.filter(
+        (item): item is { name: string; reason: string } =>
+          item !== null &&
+          typeof item === 'object' &&
+          typeof item.name === 'string' &&
+          typeof item.reason === 'string',
+      );
+      if (invalidParams.length === 0) {
+        invalidParams = undefined;
+      }
+    }
+
     return {
       type: `https://campusflow.internal/errors/${error.code.toLowerCase()}`,
       title: error.code,
@@ -93,6 +107,7 @@ export function formatErrorResponse(error: unknown, instancePath?: string): Erro
       detail: error.message,
       code: error.code,
       instance: instancePath,
+      ...(invalidParams ? { invalidParams } : {}),
     };
   }
 

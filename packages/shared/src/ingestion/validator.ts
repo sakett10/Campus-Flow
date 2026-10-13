@@ -7,6 +7,8 @@ export const INGESTION_LIMITS = {
   MAX_PDF_PAGES: 100,
   EXTRACTION_TIMEOUT_MS: 30000, // 30 seconds
   MAX_FILENAME_LENGTH: 255,
+  MAX_BATCH_FILE_COUNT: 10,
+  MAX_BATCH_TOTAL_BYTES: 100 * 1024 * 1024, // 100 MB aggregate
 } as const;
 
 export const SUPPORTED_MIME_TYPES = ['application/pdf', 'text/plain', 'text/markdown'] as const;
@@ -144,6 +146,7 @@ export function validateFileBytes(
 
   // 4. Validate supported signatures
   // PDF: %PDF- (0x25, 0x50, 0x44, 0x46, 0x2D)
+  const isPdfExtension = normalizedName.toLowerCase().endsWith('.pdf');
   if (
     buffer.length >= 5 &&
     buffer[0] === 0x25 &&
@@ -157,10 +160,20 @@ export function validateFileBytes(
       detectedMimeType: 'application/pdf',
       fileExtension: '.pdf',
       sizeBytes,
-      normalizedFileName: normalizedName.endsWith('.pdf')
-        ? normalizedName
-        : `${normalizedName}.pdf`,
+      normalizedFileName: isPdfExtension ? normalizedName : `${normalizedName}.pdf`,
       contentHash,
+    };
+  }
+
+  if (isPdfExtension) {
+    return {
+      isValid: false,
+      detectedMimeType: 'application/pdf',
+      fileExtension: '.pdf',
+      sizeBytes,
+      normalizedFileName: normalizedName,
+      contentHash,
+      error: 'Invalid PDF signature: file does not start with valid %PDF- header.',
     };
   }
 
@@ -235,3 +248,38 @@ export function assertValidFileBytes(
 }
 
 export const validateFile = validateFileBytes;
+
+/**
+ * Validates batch upload counts and aggregate size before per-file processing.
+ */
+export function validateBatchUploadLimits(files: Array<{ size: number; name?: string }>): {
+  isValid: boolean;
+  error?: string;
+  totalBytes: number;
+} {
+  if (!files || files.length === 0) {
+    return {
+      isValid: false,
+      error: 'At least one file is required for batch upload.',
+      totalBytes: 0,
+    };
+  }
+  if (files.length > INGESTION_LIMITS.MAX_BATCH_FILE_COUNT) {
+    return {
+      isValid: false,
+      error: `Batch file count (${files.length}) exceeds maximum allowed limit of ${INGESTION_LIMITS.MAX_BATCH_FILE_COUNT} files.`,
+      totalBytes: 0,
+    };
+  }
+  const totalBytes = files.reduce((acc, f) => acc + (f.size || 0), 0);
+  if (totalBytes > INGESTION_LIMITS.MAX_BATCH_TOTAL_BYTES) {
+    const totalMb = (totalBytes / (1024 * 1024)).toFixed(1);
+    const maxMb = (INGESTION_LIMITS.MAX_BATCH_TOTAL_BYTES / (1024 * 1024)).toFixed(0);
+    return {
+      isValid: false,
+      error: `Aggregate batch size (${totalMb} MB) exceeds maximum allowed limit of ${maxMb} MB.`,
+      totalBytes,
+    };
+  }
+  return { isValid: true, totalBytes };
+}

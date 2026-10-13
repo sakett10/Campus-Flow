@@ -16,6 +16,7 @@ import {
   ShieldCheck,
   Zap,
 } from 'lucide-react';
+import { useAuth } from '@clerk/nextjs';
 import {
   uploadExaminationPaper,
   fetchCourseExaminationPapers,
@@ -33,6 +34,7 @@ import type {
   ExamTopicAnalysis,
   CrossPaperComparisonReport,
   PracticeAssessment,
+  PracticeAssessmentFormat,
   PracticeQuestion,
   PracticeSubmission,
   QuestionDiagnosticFeedback,
@@ -98,8 +100,9 @@ export function ExaminationIntelligenceView({
   const [practiceDifficulty, setPracticeDifficulty] = useState<'easy' | 'medium' | 'hard'>(
     'medium',
   );
-  const [practiceFormat, setPracticeFormat] = useState('mixed');
+  const [practiceFormat, setPracticeFormat] = useState<PracticeAssessmentFormat>('standard');
   const [selectedBlueprintId, setSelectedBlueprintId] = useState<string>('');
+  const [practiceError, setPracticeError] = useState<string | null>(null);
 
   // Attempt & Submission state
   const [studentAnswers, setStudentAnswers] = useState<Record<string, string>>({});
@@ -167,19 +170,36 @@ export function ExaminationIntelligenceView({
     }
   };
 
+  const { isLoaded, isSignedIn, getToken } = useAuth();
+
   const handleUpload = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!uploadFile) return;
 
+    if (!isLoaded) {
+      setUploadError('Authentication service is initializing. Please wait a moment.');
+      return;
+    }
+    if (!isSignedIn) {
+      setUploadError('Authentication token required. Please sign in to upload examination papers.');
+      return;
+    }
+
     try {
       setIsUploading(true);
       setUploadError(null);
+
+      const token = await getToken({ skipCache: true }).catch(() => null);
+      if (!token) {
+        throw new Error('Authentication token required. Please sign in again.');
+      }
+
       const formData = new FormData();
       formData.append('file', uploadFile);
       if (uploadTitle) formData.append('title', uploadTitle);
       if (uploadExamType) formData.append('examType', uploadExamType);
 
-      const result = await uploadExaminationPaper(courseId, formData);
+      const result = await uploadExaminationPaper(courseId, formData, token);
       setUploadFile(null);
       setUploadTitle('');
       await loadPapers();
@@ -219,14 +239,21 @@ export function ExaminationIntelligenceView({
     }
   };
 
-  const handleGeneratePractice = async () => {
+  const handleGeneratePractice = async (overrideBlueprintId?: string) => {
     try {
       setIsGeneratingPractice(true);
+      setPracticeError(null);
       setSubmissionReport(null);
       setStudentAnswers({});
+      const blueprintIdToUse =
+        overrideBlueprintId !== undefined ? overrideBlueprintId : selectedBlueprintId;
+      if (overrideBlueprintId !== undefined) {
+        setSelectedBlueprintId(overrideBlueprintId);
+      }
       const result = await generatePracticeAssessment(courseId, {
         format: practiceFormat,
-        blueprintId: selectedBlueprintId || undefined,
+        blueprintId: blueprintIdToUse || undefined,
+        targetDifficulty: practiceDifficulty,
         difficulty: practiceDifficulty,
       });
       setPracticeAssessment(result.assessment);
@@ -234,7 +261,9 @@ export function ExaminationIntelligenceView({
       setActiveSubTab('practice');
       await loadQuota();
     } catch (err: unknown) {
-      alert(err instanceof Error ? err.message : 'Practice generation failed');
+      const msg = err instanceof Error ? err.message : 'Practice generation failed';
+      setPracticeError(msg);
+      alert(msg);
     } finally {
       setIsGeneratingPractice(false);
     }
@@ -476,8 +505,7 @@ export function ExaminationIntelligenceView({
                   </div>
                   <button
                     onClick={() => {
-                      setSelectedBlueprintId(selectedPaperDetails.paper.id);
-                      handleGeneratePractice();
+                      handleGeneratePractice(selectedPaperDetails.paper.id);
                     }}
                     disabled={isGeneratingPractice}
                     className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600/20 text-emerald-300 border border-emerald-500/30 text-xs font-medium hover:bg-emerald-600/30 transition-colors"
@@ -746,6 +774,22 @@ export function ExaminationIntelligenceView({
       {/* ============================================================ */}
       {activeSubTab === 'practice' && (
         <div className="space-y-6">
+          {/* Error Banner */}
+          {practiceError && (
+            <div className="p-4 rounded-xl border border-red-500/40 bg-red-950/20 text-xs text-red-300 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <span className="font-semibold text-red-400">Practice Generation Error:</span>
+                <span>{practiceError}</span>
+              </div>
+              <button
+                onClick={() => setPracticeError(null)}
+                className="px-2 py-1 rounded border border-red-500/30 text-red-300 hover:bg-red-500/20 text-[11px] font-mono shrink-0"
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
+
           {/* Generation Control Bar */}
           <div className="p-4 rounded-xl border border-[var(--cf-border)] bg-[var(--cf-bg-surface-1)] flex flex-wrap items-center justify-between gap-4">
             <div className="flex flex-wrap items-center gap-3">
@@ -755,12 +799,13 @@ export function ExaminationIntelligenceView({
                 </label>
                 <select
                   value={practiceFormat}
-                  onChange={(e) => setPracticeFormat(e.target.value)}
+                  onChange={(e) => setPracticeFormat(e.target.value as PracticeAssessmentFormat)}
                   className="px-2.5 py-1.5 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-bg-surface-2)] text-xs text-white"
                 >
-                  <option value="mixed">Mixed Comprehensive Exam</option>
-                  <option value="numerical_drill">Numerical & Formula Drill</option>
-                  <option value="conceptual_quick">Conceptual & Short-Answer</option>
+                  <option value="standard">Standard Practice Exam (Calibrated)</option>
+                  <option value="quick_diagnostic">Quick Diagnostic Drill (15m)</option>
+                  <option value="full_simulation">Full Exam Simulation (100 Marks)</option>
+                  <option value="targeted_weakness">Targeted Weakness Revision</option>
                 </select>
               </div>
 
@@ -780,10 +825,30 @@ export function ExaminationIntelligenceView({
                   <option value="hard">Hard (Challenging & Deep)</option>
                 </select>
               </div>
+
+              {papers.length > 0 && (
+                <div>
+                  <label className="text-[10px] uppercase font-mono text-[var(--cf-text-secondary)] block mb-0.5">
+                    Blueprint Paper (Optional)
+                  </label>
+                  <select
+                    value={selectedBlueprintId}
+                    onChange={(e) => setSelectedBlueprintId(e.target.value)}
+                    className="px-2.5 py-1.5 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-bg-surface-2)] text-xs text-white"
+                  >
+                    <option value="">None (Course Syllabus Synthesis)</option>
+                    {papers.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.title} ({p.examType || 'Paper'})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
             </div>
 
             <button
-              onClick={handleGeneratePractice}
+              onClick={() => handleGeneratePractice()}
               disabled={isGeneratingPractice}
               className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-semibold transition-colors flex items-center gap-2"
             >

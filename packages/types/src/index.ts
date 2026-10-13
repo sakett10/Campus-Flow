@@ -133,6 +133,53 @@ export interface ResourceChunk {
   createdAt: Date;
 }
 
+export interface BatchUploadItemResult {
+  fileName: string;
+  originalName: string;
+  sizeBytes: number;
+  status: 'uploaded' | 'rejected' | 'conflict' | 'error';
+  processingStatus?: ResourceProcessingStatus;
+  resourceId?: string;
+  error?: string;
+  duplicateResource?: {
+    id: string;
+    title: string;
+    courseId?: string | null;
+    createdAt: Date | string;
+  };
+}
+
+export interface BatchUploadResponse {
+  summary: {
+    total: number;
+    succeeded: number;
+    failed: number;
+    conflicts: number;
+  };
+  results: BatchUploadItemResult[];
+}
+
+export interface BatchExamPaperItemResult {
+  fileName: string;
+  originalName: string;
+  sizeBytes: number;
+  status: 'uploaded' | 'rejected' | 'error';
+  paperId?: string;
+  resourceId?: string;
+  questionCount?: number;
+  title?: string;
+  error?: string;
+}
+
+export interface BatchExamPaperUploadResponse {
+  summary: {
+    total: number;
+    succeeded: number;
+    failed: number;
+  };
+  results: BatchExamPaperItemResult[];
+}
+
 export type AcademicNodeType = 'module' | 'chapter' | 'topic';
 export type NodeOrigin = 'model' | 'user';
 
@@ -2184,6 +2231,14 @@ export interface CrossPaperComparisonReport {
 
 export type PracticeAssessmentFormat =
   'standard' | 'quick_diagnostic' | 'full_simulation' | 'targeted_weakness';
+
+export interface GeneratePracticeRequest {
+  format?: PracticeAssessmentFormat | 'mixed' | 'numerical_drill' | 'conceptual_quick' | undefined;
+  blueprintId?: string | null | undefined;
+  targetDifficulty?: 'easy' | 'medium' | 'hard' | undefined;
+  difficulty?: 'easy' | 'medium' | 'hard' | undefined;
+  focusTopicIds?: string[] | undefined;
+}
 
 export type PracticeAssessmentStatus = 'draft' | 'ready' | 'in_progress' | 'completed';
 
