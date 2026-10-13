@@ -62,6 +62,8 @@ assessmentsRouter.post('/', async (c) => {
     throw AppError.badRequest('Invalid assessment payload', parsed.error.format());
   }
 
+  await defaultStore.getCourse(parsed.data.courseId, session.userId);
+
   const assessment = await defaultStore.createAssessment({
     userId: session.userId,
     courseId: parsed.data.courseId,
@@ -120,6 +122,10 @@ assessmentsRouter.post('/:id/topics', async (c) => {
   }
 
   const assessment = await defaultStore.getAssessment(assessmentId, session.userId);
+  const topicNode = await defaultStore.getAcademicNode(parsed.data.topicId, session.userId);
+  if (topicNode.courseId !== assessment.courseId) {
+    throw AppError.badRequest('Topic does not belong to the assessment course.');
+  }
 
   const link = await defaultStore.linkTopicToAssessment({
     assessmentId,

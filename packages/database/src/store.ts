@@ -443,6 +443,8 @@ export class PostgresDataStore {
     weightage?: string | null | undefined;
     status?: Assessment['status'] | undefined;
   }): Promise<Assessment> {
+    await this.getCourse(assessment.courseId, assessment.userId);
+
     const rows = await this.db
       .insert(schema.assessments)
       .values({
@@ -499,6 +501,16 @@ export class PostgresDataStore {
   async linkTopicToAssessment(
     link: Omit<AssessmentTopicLink, 'id' | 'createdAt' | 'updatedAt'>,
   ): Promise<AssessmentTopicLink> {
+    const assessment = await this.getAssessment(link.assessmentId, link.userId);
+    if (assessment.courseId !== link.courseId) {
+      throw new Error('Assessment does not belong to the requested course.');
+    }
+
+    const topic = await this.getAcademicNode(link.topicId, link.userId);
+    if (topic.courseId !== link.courseId) {
+      throw new Error('Topic does not belong to the assessment course.');
+    }
+
     const rows = await this.db
       .insert(schema.assessmentTopics)
       .values({
@@ -509,6 +521,15 @@ export class PostgresDataStore {
         weight: link.weight !== null && link.weight !== undefined ? String(link.weight) : null,
         source: link.source || 'user',
         notes: link.notes ?? null,
+      })
+      .onConflictDoUpdate({
+        target: [schema.assessmentTopics.assessmentId, schema.assessmentTopics.topicId],
+        set: {
+          weight: link.weight !== null && link.weight !== undefined ? String(link.weight) : null,
+          source: link.source || 'user',
+          notes: link.notes ?? null,
+          updatedAt: new Date(),
+        },
       })
       .returning();
     const r = rows[0];
@@ -1086,6 +1107,37 @@ export class PostgresDataStore {
   }
 
   // --- Academic Nodes ---
+  async getAcademicNode(id: string, requesterUserId: string): Promise<AcademicNode> {
+    const [row] = await this.db
+      .select()
+      .from(schema.academicNodes)
+      .where(
+        and(eq(schema.academicNodes.id, id), eq(schema.academicNodes.userId, requesterUserId)),
+      );
+    if (!row) {
+      throw new Error('Academic node not found.');
+    }
+    return {
+      id: row.id,
+      courseId: row.courseId,
+      userId: row.userId,
+      parentId: row.parentId,
+      type: row.type as AcademicNode['type'],
+      title: row.title,
+      description: row.description,
+      orderIndex: row.orderIndex,
+      origin: row.origin as AcademicNode['origin'],
+      confidence: row.confidence ? Number(row.confidence) : null,
+      needsReview: row.needsReview as AcademicNode['needsReview'],
+      estimatedMinutes: row.estimatedMinutes ?? null,
+      learningObjectives: row.learningObjectives ?? null,
+      prerequisites: row.prerequisites ?? null,
+      notes: row.notes ?? null,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    };
+  }
+
   async listAcademicNodes(courseId: string, requesterUserId: string): Promise<AcademicNode[]> {
     const rows = await this.db
       .select()
@@ -3564,6 +3616,32 @@ export class PostgresDataStore {
     };
   }
 
+  async getTopicResource(id: string, requesterUserId: string): Promise<TopicResource> {
+    const [row] = await this.db
+      .select()
+      .from(schema.topicResources)
+      .where(
+        and(eq(schema.topicResources.id, id), eq(schema.topicResources.userId, requesterUserId)),
+      );
+    if (!row) {
+      throw new Error('Topic resource not found.');
+    }
+    return {
+      id: row.id,
+      topicId: row.topicId,
+      courseId: row.courseId,
+      userId: row.userId,
+      title: row.title,
+      provider: row.provider ?? null,
+      url: row.url ?? null,
+      type: row.type as TopicResource['type'],
+      verificationStatus: row.verificationStatus as TopicResource['verificationStatus'],
+      relevanceNote: row.relevanceNote ?? null,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    };
+  }
+
   async deleteTopicResource(id: string, requesterUserId: string): Promise<void> {
     await this.db
       .delete(schema.topicResources)
@@ -3794,6 +3872,35 @@ export class PostgresDataStore {
       topicTitle: r.topicTitle ?? undefined,
       courseCode: r.courseCode ?? undefined,
     }));
+  }
+
+  async getStudySession(id: string, requesterUserId: string): Promise<StudySession> {
+    const [row] = await this.db
+      .select()
+      .from(schema.studySessions)
+      .where(
+        and(eq(schema.studySessions.id, id), eq(schema.studySessions.userId, requesterUserId)),
+      );
+    if (!row) {
+      throw new Error('Study session not found.');
+    }
+    return {
+      id: row.id,
+      planId: row.planId,
+      userId: row.userId,
+      courseId: row.courseId,
+      topicId: row.topicId,
+      title: row.title,
+      scheduledDate: row.scheduledDate,
+      durationMinutes: row.durationMinutes,
+      sessionType: row.sessionType as StudySession['sessionType'],
+      status: row.status as StudySession['status'],
+      completedAt: row.completedAt,
+      notes: row.notes,
+      orderIndex: row.orderIndex,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    };
   }
 
   async updateStudySession(
@@ -4053,6 +4160,33 @@ export class PostgresDataStore {
     requesterUserId: string,
     updates: Partial<ExaminationQuestion>,
   ): Promise<ExaminationQuestion> {
+    if (updates.topicId !== undefined && updates.topicId !== null) {
+      const [question] = await this.db
+        .select({ courseId: schema.examinationQuestions.courseId })
+        .from(schema.examinationQuestions)
+        .where(
+          and(
+            eq(schema.examinationQuestions.id, id),
+            eq(schema.examinationQuestions.userId, requesterUserId),
+          ),
+        );
+      if (!question) throw new Error('Examination question not found for update.');
+
+      const [topic] = await this.db
+        .select({ id: schema.academicNodes.id, courseId: schema.academicNodes.courseId })
+        .from(schema.academicNodes)
+        .where(
+          and(
+            eq(schema.academicNodes.id, updates.topicId),
+            eq(schema.academicNodes.userId, requesterUserId),
+          ),
+        );
+      if (!topic) throw new Error('Topic node not found.');
+      if (topic.courseId !== question.courseId) {
+        throw new Error('Topic does not belong to the examination question course.');
+      }
+    }
+
     const values: Record<string, unknown> = { updatedAt: new Date() };
     if (updates.questionText !== undefined) values['questionText'] = updates.questionText;
     if (updates.marks !== undefined)

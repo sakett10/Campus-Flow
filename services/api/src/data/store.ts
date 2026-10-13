@@ -194,6 +194,7 @@ export interface DataStore {
   ): Promise<SearchResultItem[]>;
 
   // Academic Nodes (Map)
+  getAcademicNode(id: string, requesterUserId: string): Promise<AcademicNode>;
   listAcademicNodes(courseId: string, requesterUserId: string): Promise<AcademicNode[]>;
   createAcademicNodes(
     nodes: Array<Omit<AcademicNode, 'id' | 'createdAt' | 'updatedAt'>>,
@@ -255,6 +256,7 @@ export interface DataStore {
   getTodayOverview(userId: string, timezone?: string, now?: Date): Promise<TodayOverviewResponse>;
 
   // Topic Resources
+  getTopicResource(id: string, requesterUserId: string): Promise<TopicResource>;
   listTopicResources(topicId: string, requesterUserId: string): Promise<TopicResource[]>;
   createTopicResource(
     data: Omit<TopicResource, 'id' | 'createdAt' | 'updatedAt'>,
@@ -273,6 +275,7 @@ export interface DataStore {
   deleteStudyPlan(id: string, requesterUserId: string): Promise<void>;
 
   // Study Sessions
+  getStudySession(id: string, requesterUserId: string): Promise<StudySession>;
   createStudySessions(
     sessions: Array<Omit<StudySession, 'id' | 'createdAt' | 'updatedAt'>>,
   ): Promise<StudySession[]>;
@@ -1505,6 +1508,18 @@ export class InMemoryDataStore implements DataStore {
       created.push(record);
     }
     return created;
+  }
+
+  async getAcademicNode(id: string, requesterUserId: string): Promise<AcademicNode> {
+    if (!isValidUuid(id) || !isValidUuid(requesterUserId)) {
+      throw AppError.badRequest('Invalid node ID format.');
+    }
+    const node = this.academicNodes.get(id);
+    if (!node) {
+      throw AppError.notFound('Academic node not found.');
+    }
+    assertOwnership(node.userId, requesterUserId, 'AcademicNode');
+    return node;
   }
 
   async updateAcademicNode(
@@ -2990,6 +3005,18 @@ export class InMemoryDataStore implements DataStore {
     return record;
   }
 
+  async getTopicResource(id: string, requesterUserId: string): Promise<TopicResource> {
+    if (!isValidUuid(id) || !isValidUuid(requesterUserId)) {
+      throw AppError.badRequest('Invalid UUID format.');
+    }
+    const resource = this.topicResources.get(id);
+    if (!resource) {
+      throw AppError.notFound('Topic resource not found.');
+    }
+    assertOwnership(resource.userId, requesterUserId, 'TopicResource');
+    return resource;
+  }
+
   async deleteTopicResource(id: string, requesterUserId: string): Promise<void> {
     if (!isValidUuid(id) || !isValidUuid(requesterUserId)) {
       throw AppError.badRequest('Invalid UUID format.');
@@ -3113,6 +3140,18 @@ export class InMemoryDataStore implements DataStore {
         courseCode: this.courses.get(s.courseId)?.code,
       }))
       .sort((a, b) => a.scheduledDate.getTime() - b.scheduledDate.getTime());
+  }
+
+  async getStudySession(id: string, requesterUserId: string): Promise<StudySession> {
+    if (!isValidUuid(id) || !isValidUuid(requesterUserId)) {
+      throw AppError.badRequest('Invalid UUID format.');
+    }
+    const session = this.studySessions.get(id);
+    if (!session) {
+      throw AppError.notFound('Study session not found.');
+    }
+    assertOwnership(session.userId, requesterUserId, 'StudySession');
+    return session;
   }
 
   async updateStudySession(
@@ -3335,6 +3374,21 @@ export class InMemoryDataStore implements DataStore {
       throw AppError.notFound('Examination question not found.');
     }
     assertOwnership(q.userId, requesterUserId, 'ExaminationQuestion');
+
+    if (updates.topicId !== undefined && updates.topicId !== null) {
+      if (!isValidUuid(updates.topicId)) {
+        throw AppError.badRequest('Invalid topic ID format.');
+      }
+      const topic = this.academicNodes.get(updates.topicId);
+      if (!topic) {
+        throw AppError.notFound('Topic node not found.');
+      }
+      assertOwnership(topic.userId, requesterUserId, 'AcademicNode');
+      if (topic.courseId !== q.courseId) {
+        throw AppError.badRequest('Topic does not belong to the examination question course.');
+      }
+    }
+
     const updated: ExaminationQuestion = {
       ...q,
       ...updates,

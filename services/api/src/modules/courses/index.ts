@@ -445,6 +445,11 @@ coursesRouter.put('/:id/map/nodes/:nodeId', async (c) => {
   const nodeId = c.req.param('nodeId');
   await defaultStore.getCourse(id, session.userId);
 
+  const node = await defaultStore.getAcademicNode(nodeId, session.userId);
+  if (node.courseId !== id) {
+    throw AppError.notFound('Academic node does not belong to this course.');
+  }
+
   const body = await c.req.json().catch(() => null);
   const editSchema = z.object({
     title: z.string().min(1).max(255).optional(),
@@ -457,6 +462,16 @@ coursesRouter.put('/:id/map/nodes/:nodeId', async (c) => {
   const parsed = editSchema.safeParse(body);
   if (!parsed.success) {
     throw AppError.badRequest('Invalid edit node payload', parsed.error.format());
+  }
+
+  if (parsed.data.parentId !== undefined && parsed.data.parentId !== null) {
+    if (parsed.data.parentId === nodeId) {
+      throw AppError.badRequest('An academic node cannot be its own parent.');
+    }
+    const parent = await defaultStore.getAcademicNode(parsed.data.parentId, session.userId);
+    if (parent.courseId !== id) {
+      throw AppError.badRequest('Parent node does not belong to this course.');
+    }
   }
 
   const updates: Partial<AcademicNode> = {};
@@ -476,6 +491,12 @@ coursesRouter.delete('/:id/map/nodes/:nodeId', async (c) => {
   const id = c.req.param('id');
   const nodeId = c.req.param('nodeId');
   await defaultStore.getCourse(id, session.userId);
+
+  const node = await defaultStore.getAcademicNode(nodeId, session.userId);
+  if (node.courseId !== id) {
+    throw AppError.notFound('Academic node does not belong to this course.');
+  }
+
   await defaultStore.deleteAcademicNode(nodeId, session.userId);
   return c.json({ success: true });
 });
@@ -486,6 +507,11 @@ coursesRouter.post('/:id/map/nodes/:nodeId/resources', async (c) => {
   const id = c.req.param('id');
   const nodeId = c.req.param('nodeId');
   await defaultStore.getCourse(id, session.userId);
+
+  const node = await defaultStore.getAcademicNode(nodeId, session.userId);
+  if (node.courseId !== id) {
+    throw AppError.notFound('Academic node does not belong to this course.');
+  }
 
   const body = await c.req.json().catch(() => null);
   const linkSchema = z.object({
@@ -672,6 +698,11 @@ coursesRouter.post('/:id/assessments/:assessmentId/topics', async (c) => {
     throw AppError.badRequest('Invalid link topic payload', parsed.error.format());
   }
 
+  const topicNode = await defaultStore.getAcademicNode(parsed.data.topicId, session.userId);
+  if (topicNode.courseId !== id) {
+    throw AppError.badRequest('Topic does not belong to the assessment course.');
+  }
+
   const link = await defaultStore.linkTopicToAssessment({
     assessmentId,
     topicId: parsed.data.topicId,
@@ -856,8 +887,14 @@ coursesRouter.post('/:id/topics/:topicId/resources', async (c) => {
 coursesRouter.delete('/:id/topics/:topicId/resources/:resourceId', async (c) => {
   const session = getSession(c);
   const id = c.req.param('id');
+  const topicId = c.req.param('topicId');
   const resourceId = c.req.param('resourceId');
   await defaultStore.getCourse(id, session.userId);
+
+  const resItem = await defaultStore.getTopicResource(resourceId, session.userId);
+  if (resItem.courseId !== id || resItem.topicId !== topicId) {
+    throw AppError.notFound('Topic resource does not belong to this topic/course.');
+  }
 
   await defaultStore.deleteTopicResource(resourceId, session.userId);
   return c.json({ success: true, message: 'Resource removed.' });
@@ -985,6 +1022,11 @@ coursesRouter.put('/:id/plan/sessions/:sessionId', async (c) => {
   const id = c.req.param('id');
   const sessionId = c.req.param('sessionId');
   await defaultStore.getCourse(id, session.userId);
+
+  const existingSession = await defaultStore.getStudySession(sessionId, session.userId);
+  if (existingSession.courseId !== id) {
+    throw AppError.notFound('Study session does not belong to this course.');
+  }
 
   const body = await c.req.json().catch(() => null);
   const parsed = updateSessionSchema.safeParse(body);

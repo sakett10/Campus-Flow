@@ -591,6 +591,16 @@ examinationRouter.post('/courses/:courseId/practice/generate', async (c) => {
 
   const nodes = await defaultStore.listAcademicNodes(courseId, session.userId);
 
+  if (parsed.data.focusTopicIds && parsed.data.focusTopicIds.length > 0) {
+    const validTopicIds = new Set(nodes.filter((n) => n.type === 'topic').map((n) => n.id));
+    const invalidTopics = parsed.data.focusTopicIds.filter((tId) => !validTopicIds.has(tId));
+    if (invalidTopics.length > 0) {
+      throw AppError.badRequest(
+        `Invalid focus topics: one or more topics [${invalidTopics.join(', ')}] do not belong to this course.`,
+      );
+    }
+  }
+
   const practiceOptions = {
     userId: session.userId,
     courseId,
@@ -641,8 +651,9 @@ examinationRouter.get('/practice/:assessmentId', async (c) => {
 
   const assessment = await defaultStore.getPracticeAssessment(assessmentId, session.userId);
 
-  // If student hasn't submitted yet and not explicitly requesting solutions, strip solutions
-  if (!showSolutions) {
+  // If student hasn't completed the assessment yet or not explicitly requesting solutions, strip solutions
+  const isCompleted = assessment.status === 'completed';
+  if (!isCompleted || !showSolutions) {
     const studentViewQuestions = assessment.questions.map((q) => ({
       ...q,
       workedSolution: '[Hidden until submission]',

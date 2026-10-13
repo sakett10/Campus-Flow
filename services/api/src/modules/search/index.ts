@@ -18,6 +18,10 @@ searchRouter.get('/', async (c) => {
   const q = c.req.query('q') || c.req.query('query');
   const courseId = c.req.query('courseId') || null;
 
+  if (courseId) {
+    await defaultStore.getCourse(courseId, session.userId);
+  }
+
   if (!q || !q.trim()) {
     return c.json({
       query: '',
@@ -43,6 +47,10 @@ searchRouter.post('/', async (c) => {
   const parsed = searchQuerySchema.safeParse(body);
   if (!parsed.success) {
     throw AppError.badRequest('Invalid search parameters', parsed.error.format());
+  }
+
+  if (parsed.data.courseId) {
+    await defaultStore.getCourse(parsed.data.courseId, session.userId);
   }
 
   const results = await defaultStore.searchChunks(
